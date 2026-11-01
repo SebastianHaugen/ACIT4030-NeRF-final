@@ -35,6 +35,7 @@ from src.repo_util.LoadConfigurations import (
     TEST_EVERY,
     MAX_TEST_VIEWS,
     N_FIGURE_VIEWS,
+    EXPERIMENT,
 )
 
 IEEE_TEXT_WIDTH_IN = 7.16    # full page width of an IEEE two-column paper in inches
@@ -234,7 +235,7 @@ def main():
     write_per_view_csv(rows, OUTPUT_DIR / "metrics_per_view.csv")
     summary = write_summary_csv(rows, OUTPUT_DIR / "metrics.csv")
 
-    figure_path = FIGURES_DIR / f"qualitative_{ACTIVE_DATASET}.png"
+    figure_path = FIGURES_DIR / f"qualitative_{ACTIVE_DATASET}_{EXPERIMENT}.png"
     save_qualitative_figure(targets, renders, rows, pick_figure_views(rows, N_FIGURE_VIEWS), figure_path)
 
     print(

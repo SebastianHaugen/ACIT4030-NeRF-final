@@ -20,11 +20,11 @@ datasets:
     data_dir: data/poster
     output_dir: outputs/src/poster
     n_iter: 30000
-    resize_to: null
+    resize_to: [480, 270]         
     znear: 0.01
-    zfar: 10.0
-    min_depth: 0.1
-    max_depth: 5.0
+    zfar: 20.0                   
+    min_depth: 0.2                
+    max_depth: 10.0              
     use_silhouette_loss: false
     test_every: 8
     n_figure_views: 4
