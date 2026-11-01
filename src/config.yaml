@@ -62,10 +62,10 @@ smoke_test:
   min_loss_drop: 0.3
 
 # --- final project additions 
-experiment: uniform                 # subfolder name per run, e.g. outputs/src/lego/uniform
+experiment: hier_64_128
 sampler:
-  type: uniform                     # uniform | hierarchical
-  stratified: false
+  type: hierarchical
+  stratified: true
   n_coarse: 64
   n_fine: 128
-  density_uses_delta: false         # true = NeRF eq. 3 (needed for hierarchical)
+  density_uses_delta: true
