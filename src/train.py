@@ -9,8 +9,9 @@ Final project additions:
 - sampler.density_uses_delta: opacity depends on the sample spacing (see model.py)
 """
 import csv
-import shutil
 import time
+
+import yaml
 
 import matplotlib
 matplotlib.use("Agg")  # saves figures to disk without opening windows
@@ -28,7 +29,7 @@ from src.load_nerf_data import load_nerf_data
 from src.model import NeuralRadianceField
 from src.render import render_rays
 from src.repo_util.LoadConfigurations import (
-    CONFIG_PATH,
+    CONFIG,
     ACTIVE_DATASET,
     DATA_DIR,
     OUTPUT_DIR,
@@ -292,10 +293,11 @@ def main(
     output_dir.mkdir(parents=True, exist_ok=True)
     preview_dir = output_dir / "previews"
     preview_dir.mkdir(exist_ok=True)
-    # Saves a copy of the settings this run used, the copy is never read as a config
+    # Saves the settings this run actually used, including any NERF_* environment overrides,
+    # so report_figures.py and the report always see the real settings. Never read as a config
     config_copy = output_dir / "config_used.yaml"
-    shutil.copy(CONFIG_PATH, config_copy)
-    with open(config_copy, "a", encoding="utf-8") as f:
+    with open(config_copy, "w", encoding="utf-8") as f:
+        yaml.safe_dump(CONFIG, f, sort_keys=False)
         f.write(f"\n# This run: dataset = {ACTIVE_DATASET}, experiment = {EXPERIMENT}, n_iter = {n_iter}\n")
 
     # Data

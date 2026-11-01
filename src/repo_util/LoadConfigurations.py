@@ -31,7 +31,7 @@ N_HIDDEN_NEURONS = CONFIG["model"]["n_hidden_neurons"]
 
 # Rendering
 N_RAYS_PER_IMAGE = CONFIG["render"]["n_rays_per_image"]
-N_PTS_PER_RAY = CONFIG["render"]["n_pts_per_ray"]
+N_PTS_PER_RAY = CONFIG["render"]["n_pts_per_ray"]  # may be overridden below by NERF_N_PTS
 N_BATCHES_FULL_RENDER = CONFIG["render"]["n_batches_full_render"]
 
 # Training
@@ -77,20 +77,49 @@ DATASET_OUTPUT_DIRS = {
 }
 DATASET_N_ITERATIONS = {name: settings["n_iter"] for name, settings in CONFIG["datasets"].items()}
 
+
+def _env_bool(name, default):
+    """Reads true/false from an environment variable, or returns the config value if it is not set."""
+    value = os.environ.get(name)
+    if value is None:
+        return bool(default)
+    return value.strip().lower() in ("1", "true", "yes", "on")
+
+
 # Sampling settings (src/model.py, src/sampling.py, src/render.py, src/train.py)
-SAMPLER = CONFIG["sampler"]["type"]
-STRATIFIED = CONFIG["sampler"]["stratified"]
-N_COARSE = CONFIG["sampler"]["n_coarse"]
-N_FINE = CONFIG["sampler"]["n_fine"]
-DENSITY_USES_DELTA = CONFIG["sampler"]["density_uses_delta"]
+# Every setting can be overridden with an environment variable, so run_lego.ps1 can queue
+# several experiments without editing config.yaml. Not set = value from config.yaml
+SAMPLER = os.environ.get("NERF_SAMPLER", CONFIG["sampler"]["type"])                         # uniform | hierarchical
+STRATIFIED = _env_bool("NERF_STRATIFIED", CONFIG["sampler"]["stratified"])
+DENSITY_USES_DELTA = _env_bool("NERF_DELTA", CONFIG["sampler"]["density_uses_delta"])       # NeRF eq. 3
+N_COARSE = int(os.environ.get("NERF_N_COARSE", CONFIG["sampler"]["n_coarse"]))
+N_FINE = int(os.environ.get("NERF_N_FINE", CONFIG["sampler"]["n_fine"]))
+N_PTS_PER_RAY = int(os.environ.get("NERF_N_PTS", N_PTS_PER_RAY))                            # uniform runs
+
+# One output folder per experiment, so runs don't overwrite each other
 EXPERIMENT = os.environ.get("NERF_EXPERIMENT", CONFIG["experiment"])
 OUTPUT_DIR = OUTPUT_DIR / EXPERIMENT
+
+# Writes the values actually used back into CONFIG, so train.py saves them in config_used.yaml
+CONFIG["experiment"] = EXPERIMENT
+CONFIG["active_dataset"] = ACTIVE_DATASET
+CONFIG["render"]["n_pts_per_ray"] = N_PTS_PER_RAY
+CONFIG["sampler"].update({
+    "type": SAMPLER,
+    "stratified": STRATIFIED,
+    "density_uses_delta": DENSITY_USES_DELTA,
+    "n_coarse": N_COARSE,
+    "n_fine": N_FINE,
+})
 
 
 # Quick check that the config loads, prints the main settings of the active dataset
 if __name__ == "__main__":
     print(PREVIEW_MESSAGE)
     print(f"Active dataset: {ACTIVE_DATASET}")
+    print(f"Experiment:     {EXPERIMENT}")
+    print(f"Sampler:        {SAMPLER} (stratified={STRATIFIED}, delta={DENSITY_USES_DELTA}, "
+          f"points={N_PTS_PER_RAY if SAMPLER == 'uniform' else f'{N_COARSE}+{N_FINE}'})")
     print(f"Data dir:       {DATA_DIR}")
     print(f"Output dir:     {OUTPUT_DIR}")
     print(f"Iterations:     {N_ITERATIONS}")
