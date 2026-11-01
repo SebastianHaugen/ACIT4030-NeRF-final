@@ -46,7 +46,7 @@ train:
   lr_decay_factor: 0.1
   huber_scaling: 0.1
   seed: 1
-  vis_every: 500
+  vis_every: 2500
   checkpoint_every: 1000
 
 evaluation:

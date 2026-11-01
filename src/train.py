@@ -328,11 +328,13 @@ def main(
     lr_decay_iteration = round(n_iter * LR_DECAY_AT)  # iteration where the learning rate drops
 
     loss_history_color, loss_history_sil, loss_history_coarse, loss_history_total = [], [], [], []
-    elapsed = []
+    elapsed = []              # cumulative training time per iteration, for the wall-clock plots
+    train_seconds = 0.0       # counts only the training steps, not previews or checkpoints
     start_time = time.time()
     extent = (x_extent, y_extent)
 
     for iteration in tqdm(range(n_iter), desc="Training"):
+        step_start = time.time()
         if iteration == lr_decay_iteration:
             # Same as the baseline, a new optimizer with a lower learning rate
             tqdm.write(f"Decreasing LR by factor {LR_DECAY_FACTOR} ...")
@@ -370,7 +372,10 @@ def main(
 
         loss.backward()
         optimizer.step()
-        elapsed.append(time.time() - start_time)
+        if device.type == "cuda":
+            torch.cuda.synchronize()  # waits for the GPU to finish, so the step time is accurate
+        train_seconds += time.time() - step_start
+        elapsed.append(train_seconds)
 
         # Saves a preview regularly and at the last iteration
         if iteration % vis_every == 0 or iteration == n_iter - 1:
@@ -401,7 +406,8 @@ def main(
         output_dir / "loss_history.csv",
     )
     total_time = time.time() - start_time
-    print(f"Done in {total_time / 60:.1f} min ({total_time / n_iter:.3f} s/iteration). "
+    print(f"Done in {total_time / 60:.1f} min total, {train_seconds / 60:.1f} min training "
+          f"({train_seconds / n_iter:.3f} s/iteration, previews and checkpoints excluded). "
           f"Outputs in {output_dir}")
     return {"color": loss_history_color, "silhouette": loss_history_sil, "total": loss_history_total}
 
