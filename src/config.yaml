@@ -7,7 +7,7 @@ datasets:
   lego:
     data_dir: data/lego
     output_dir: outputs/src/lego
-    n_iter: 10000
+    n_iter: 20000                 
     resize_to: [200, 200]
     znear: 0.01
     zfar: 10.0
@@ -19,7 +19,7 @@ datasets:
   poster:
     data_dir: data/poster
     output_dir: outputs/src/poster
-    n_iter: 20000
+    n_iter: 30000
     resize_to: null
     znear: 0.01
     zfar: 10.0
@@ -62,10 +62,10 @@ smoke_test:
   min_loss_drop: 0.3
 
 # --- final project additions 
-experiment: hier_64_128
+experiment: uniform               
 sampler:
-  type: hierarchical
-  stratified: true
+  type: uniform
+  stratified: false
   n_coarse: 64
   n_fine: 128
-  density_uses_delta: true
+  density_uses_delta: false
