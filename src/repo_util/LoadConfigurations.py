@@ -77,6 +77,15 @@ DATASET_OUTPUT_DIRS = {
 }
 DATASET_N_ITERATIONS = {name: settings["n_iter"] for name, settings in CONFIG["datasets"].items()}
 
+# Sampling settings (src/model.py, src/sampling.py, src/render.py, src/train.py)
+SAMPLER = CONFIG["sampler"]["type"]
+STRATIFIED = CONFIG["sampler"]["stratified"]
+N_COARSE = CONFIG["sampler"]["n_coarse"]
+N_FINE = CONFIG["sampler"]["n_fine"]
+DENSITY_USES_DELTA = CONFIG["sampler"]["density_uses_delta"]
+EXPERIMENT = os.environ.get("NERF_EXPERIMENT", CONFIG["experiment"])
+OUTPUT_DIR = OUTPUT_DIR / EXPERIMENT
+
 
 # Quick check that the config loads, prints the main settings of the active dataset
 if __name__ == "__main__":

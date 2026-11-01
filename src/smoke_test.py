@@ -8,22 +8,22 @@ import sys
 from src.train import main as train
 from src.repo_util.LoadConfigurations import (
     ACTIVE_DATASET,
+    EXPERIMENT,
     SMOKE_N_ITERATIONS,
     SMOKE_VISUALIZE_EVERY,
     SMOKE_OUTPUT_DIR,
     SMOKE_MIN_LOSS_DROP,
 )
 
-
 def main():
     """Trains for a few hundred iterations and checks that the loss goes down."""
-    print(f"Smoke test on {ACTIVE_DATASET}: {SMOKE_N_ITERATIONS} iterations -> {SMOKE_OUTPUT_DIR}")
-    # Uses the same training loop as a full run, only with the smoke test settings
+    output_dir = SMOKE_OUTPUT_DIR / EXPERIMENT
+    print(f"Smoke test on {ACTIVE_DATASET} ({EXPERIMENT}): {SMOKE_N_ITERATIONS} iterations -> {output_dir}")
     history = train(
         n_iter=SMOKE_N_ITERATIONS,
-        output_dir=SMOKE_OUTPUT_DIR,
+        output_dir=output_dir,
         vis_every=SMOKE_VISUALIZE_EVERY,
-        checkpoint_every=SMOKE_N_ITERATIONS,  # saves only the final checkpoint
+        checkpoint_every=SMOKE_N_ITERATIONS,
     )
 
     # Compares the average loss over the first and the last 10 % of the run

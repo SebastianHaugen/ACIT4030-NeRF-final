@@ -35,12 +35,12 @@ model:
   n_hidden_neurons: 256
 
 render:
-  n_rays_per_image: 750
+  n_rays_per_image: 400
   n_pts_per_ray: 128
   n_batches_full_render: 16
 
 train:
-  batch_size: 6
+  batch_size: 2
   learning_rate: 0.001
   lr_decay_at: 0.75
   lr_decay_factor: 0.1
@@ -61,7 +61,7 @@ smoke_test:
   output_dir: outputs/src/smoke_test
   min_loss_drop: 0.3
 
-# --- final project additions (read by src only, once implemented) ---
+# --- final project additions 
 experiment: uniform                 # subfolder name per run, e.g. outputs/src/lego/uniform
 sampler:
   type: uniform                     # uniform | hierarchical
