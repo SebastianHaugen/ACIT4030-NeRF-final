@@ -56,8 +56,8 @@ evaluation:
   loss_smoothing_window: 100
 
 smoke_test:
-  n_iter: 300
-  vis_every: 100
+  n_iter: 1000
+  vis_every: 250
   output_dir: outputs/src/smoke_test
   min_loss_drop: 0.3
 
