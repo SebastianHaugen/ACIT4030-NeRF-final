@@ -1,0 +1,72 @@
+preview:
+  the-preview: "Final project (src)"
+
+active_dataset: lego
+
+datasets:
+  lego:
+    data_dir: data/lego
+    output_dir: outputs/src/lego
+    n_iter: 10000
+    resize_to: [200, 200]
+    znear: 0.01
+    zfar: 10.0
+    min_depth: 2.0
+    max_depth: 6.0
+    use_silhouette_loss: true
+    test_every: null
+    n_figure_views: 4
+  poster:
+    data_dir: data/poster
+    output_dir: outputs/src/poster
+    n_iter: 20000
+    resize_to: null
+    znear: 0.01
+    zfar: 10.0
+    min_depth: 0.1
+    max_depth: 5.0
+    use_silhouette_loss: false
+    test_every: 8
+    n_figure_views: 4
+
+model:
+  n_harmonic_functions: 60
+  omega0: 0.1
+  n_hidden_neurons: 256
+
+render:
+  n_rays_per_image: 400
+  n_pts_per_ray: 128
+  n_batches_full_render: 16
+
+train:
+  batch_size: 2
+  learning_rate: 0.001
+  lr_decay_at: 0.75
+  lr_decay_factor: 0.1
+  huber_scaling: 0.1
+  seed: 1
+  vis_every: 500
+  checkpoint_every: 1000
+
+evaluation:
+  max_test_views: 25
+  lpips_net: vgg
+  figures_dir: outputs/src/figures
+  loss_smoothing_window: 100
+
+smoke_test:
+  n_iter: 1000
+  vis_every: 250
+  output_dir: outputs/src/smoke_test
+  min_loss_drop: 0.3
+
+# --- final project additions 
+experiment: uniform                 # subfolder name per run, e.g. outputs/src/lego/uniform
+sampler:
+  type: uniform                     # uniform | hierarchical
+  stratified: false
+  n_coarse: 64
+  n_fine: 128
+  density_uses_delta: false         # true = NeRF eq. 3 (needed for hierarchical)
+# This run: dataset = lego, experiment = uniform, n_iter = 1000

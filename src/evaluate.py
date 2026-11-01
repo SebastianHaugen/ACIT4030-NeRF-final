@@ -1,6 +1,7 @@
 """
 Evaluates a trained NeRF on the held-out test views of the active dataset.
 Run from the project root after training with python -m src.evaluate
+Works for both uniform (coarse only) and hierarchical (coarse + fine) checkpoints.
 """
 import csv
 import statistics
@@ -11,12 +12,12 @@ from tqdm import tqdm
 from pytorch3d.renderer import (
     NDCMultinomialRaysampler,
     EmissionAbsorptionRaymarcher,
-    ImplicitRenderer,
 )
 
 from src.load_nerf_data import load_nerf_data
 from src.model import NeuralRadianceField
 from src.metrics import psnr, ssim, LPIPSMetric
+from src.render import render_rays
 from src.train import select_cameras, fix_fov_for_aspect
 from src.repo_util.LoadConfigurations import (
     ACTIVE_DATASET,
@@ -29,6 +30,8 @@ from src.repo_util.LoadConfigurations import (
     RAY_MIN_DEPTH,
     RAY_MAX_DEPTH,
     N_PTS_PER_RAY,
+    N_COARSE,
+    N_FINE,
     TEST_EVERY,
     MAX_TEST_VIEWS,
     N_FIGURE_VIEWS,
@@ -69,7 +72,7 @@ def load_test_split(device):
 
 
 def load_model(device):
-    """Loads the trained model from the checkpoint of the active dataset."""
+    """Loads the coarse model, and the fine model if the run used hierarchical sampling."""
     checkpoint_path = OUTPUT_DIR / "checkpoint.pt"
     if not checkpoint_path.exists():
         raise FileNotFoundError(f"No checkpoint at {checkpoint_path}. Train first: python -m src.train")
@@ -80,11 +83,23 @@ def load_model(device):
             f"Checkpoint was trained on '{checkpoint.get('dataset')}', "
             f"but active_dataset is '{ACTIVE_DATASET}'."
         )
-    model = NeuralRadianceField().to(device)
-    model.load_state_dict(checkpoint["model_state_dict"])
-    model.eval()
-    print(f"Loaded checkpoint from iteration {checkpoint['iteration']}")
-    return model
+
+    # Older baseline-style checkpoints only have model_state_dict, which is the coarse model
+    coarse_state = checkpoint.get("coarse_state_dict", checkpoint.get("model_state_dict"))
+    coarse = NeuralRadianceField().to(device)
+    coarse.load_state_dict(coarse_state)
+    coarse.eval()
+
+    # Only hierarchical runs have a fine model
+    fine = None
+    if checkpoint.get("fine_state_dict") is not None:
+        fine = NeuralRadianceField().to(device)
+        fine.load_state_dict(checkpoint["fine_state_dict"])
+        fine.eval()
+
+    sampling = "hierarchical" if fine is not None else "uniform"
+    print(f"Loaded checkpoint from iteration {checkpoint['iteration']} ({sampling} sampling)")
+    return coarse, fine
 
 
 def write_per_view_csv(rows, path):
@@ -181,26 +196,26 @@ def main():
     n_views, height, width, _ = target_images.shape
     print(f"Evaluating on {n_views} test views at {width}x{height}")
 
-    # Renders whole images, unlike the random rays used during training
-    renderer = ImplicitRenderer(
-        raysampler=NDCMultinomialRaysampler(
-            image_height=height,
-            image_width=width,
-            n_pts_per_ray=N_PTS_PER_RAY,
-            min_depth=RAY_MIN_DEPTH,
-            max_depth=RAY_MAX_DEPTH,
-        ),
-        raymarcher=EmissionAbsorptionRaymarcher(),
-    ).to(device)
-    model = load_model(device)
+    coarse, fine = load_model(device)
     lpips_metric = LPIPSMetric(device)
+
+    # One ray per pixel. The coarse sample count must match training, and there is no
+    # random jitter at test time (stratified sampling is off by default), so results are deterministic
+    raysampler = NDCMultinomialRaysampler(
+        image_height=height,
+        image_width=width,
+        n_pts_per_ray=N_COARSE if fine is not None else N_PTS_PER_RAY,
+        min_depth=RAY_MIN_DEPTH,
+        max_depth=RAY_MAX_DEPTH,
+    )
+    raymarcher = EmissionAbsorptionRaymarcher()
 
     rows, renders, targets = [], [], []
     for i in tqdm(range(n_views), desc="Rendering test views"):
-        # batched_forward renders in chunks to save memory
-        rendered, _ = renderer(
-            cameras=select_cameras(target_cameras, [i]),
-            volumetric_function=model.batched_forward,
+        ray_bundle = raysampler(cameras=select_cameras(target_cameras, [i]))
+        # Coarse pass, then (if hierarchical) the fine pass; chunked to save memory
+        rendered, _ = render_rays(
+            ray_bundle, coarse, fine, raymarcher, N_FINE, training=False, chunked=True
         )
         # Keeps the RGB channels and drops the opacity channel
         prediction = rendered[0, ..., :3].clamp(0.0, 1.0)

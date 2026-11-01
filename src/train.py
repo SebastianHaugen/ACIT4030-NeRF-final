@@ -1,9 +1,16 @@
 """
-Trains the baseline NeRF on the active dataset, adapted from baseline/train_nerf.py (course book Chapter 6).
-All settings are read from config.yaml, and the NERF_DATASET variable picks the dataset for one run.
+Trains the NeRF on the active dataset, adapted from baseline/train_nerf.py (course book Chapter 6).
+All settings are read from config.yaml, and the NERF_DATASET / NERF_EXPERIMENT variables pick
+the dataset and experiment for one run.
+
+Final project additions:
+- sampler.type: uniform (one model, like the baseline) or hierarchical (coarse + fine model, NeRF Sec. 5.2)
+- sampler.stratified: random jitter of the sample depths during training
+- sampler.density_uses_delta: opacity depends on the sample spacing (see model.py)
 """
 import csv
 import shutil
+import time
 
 import matplotlib
 matplotlib.use("Agg")  # saves figures to disk without opening windows
@@ -15,11 +22,11 @@ from pytorch3d.renderer import (
     NDCMultinomialRaysampler,
     MonteCarloRaysampler,
     EmissionAbsorptionRaymarcher,
-    ImplicitRenderer,
 )
 
 from src.load_nerf_data import load_nerf_data
 from src.model import NeuralRadianceField
+from src.render import render_rays
 from src.repo_util.LoadConfigurations import (
     CONFIG_PATH,
     ACTIVE_DATASET,
@@ -43,9 +50,21 @@ from src.repo_util.LoadConfigurations import (
     RANDOM_SEED,
     VISUALIZE_EVERY,
     CHECKPOINT_EVERY,
+    SAMPLER,
+    STRATIFIED,
+    N_COARSE,
+    N_FINE,
+    DENSITY_USES_DELTA,
+    EXPERIMENT,
 )
 
 PREVIEW_VIEW = 0  # the same training view in every preview, so they can be compared over time
+HIERARCHICAL = SAMPLER == "hierarchical"
+if SAMPLER not in ("uniform", "hierarchical"):
+    raise ValueError(f"Unknown sampler.type '{SAMPLER}', expected 'uniform' or 'hierarchical'")
+
+# Uniform uses n_pts_per_ray samples, hierarchical uses n_coarse in the first pass (+ n_fine in the second)
+N_PTS_FIRST_PASS = N_COARSE if HIERARCHICAL else N_PTS_PER_RAY
 
 
 # Helper functions, huber and sample_images_at_mc_locs come from the baseline
@@ -141,56 +160,119 @@ def load_train_split(device):
     return images, silhouettes, cameras
 
 
-def save_preview(model, camera, target_image, renderer_grid, hist_color, hist_sil, iteration, path):
+def make_train_raysampler(x_extent, y_extent):
+    """Random rays for each training step, optionally with stratified (jittered) sample depths."""
+    kwargs = dict(
+        min_x=-x_extent,
+        max_x=x_extent,
+        min_y=-y_extent,
+        max_y=y_extent,
+        n_rays_per_image=N_RAYS_PER_IMAGE,
+        n_pts_per_ray=N_PTS_FIRST_PASS,
+        min_depth=RAY_MIN_DEPTH,
+        max_depth=RAY_MAX_DEPTH,
+    )
+    if STRATIFIED:
+        kwargs["stratified_sampling"] = True
+    try:
+        return MonteCarloRaysampler(**kwargs)
+    except TypeError as e:
+        raise RuntimeError(
+            "This PyTorch3D version does not support stratified_sampling in MonteCarloRaysampler "
+            "(added in 0.7.x). Update PyTorch3D or set sampler.stratified: false."
+        ) from e
+
+
+def compute_losses(rendered, xys, target_images, target_silhouettes, batch_idx, extent):
+    """Colour loss (and silhouette loss for lego) for one rendered ray batch."""
+    rendered_images, rendered_silhouettes = rendered.split([3, 1], dim=-1)
+
+    # Real colours at the same pixels as the rendered rays
+    colors_at_rays = sample_images_at_mc_locs(target_images[batch_idx], xys, extent)
+    color_err = huber(rendered_images, colors_at_rays).abs().mean()
+
+    sil_err = None
+    # Only lego has an alpha channel for the silhouette loss
+    if USE_SILHOUETTE_LOSS:
+        silhouettes_at_rays = sample_images_at_mc_locs(
+            target_silhouettes[batch_idx, ..., None], xys, extent
+        )
+        sil_err = huber(rendered_silhouettes, silhouettes_at_rays).abs().mean()
+    return color_err, sil_err
+
+
+def save_preview(coarse, fine, raysampler_grid, raymarcher, camera, target_image,
+                 hist_color, hist_sil, iteration, path):
     """Saves a full render of one training view next to the ground truth and the loss curves."""
     with torch.no_grad():
-        rendered, _ = renderer_grid(
-            cameras=camera, volumetric_function=model.batched_forward
+        ray_bundle = raysampler_grid(cameras=camera)
+        rendered, rendered_coarse = render_rays(
+            ray_bundle, coarse, fine, raymarcher, N_FINE, training=False, chunked=True
         )
     rendered_image = rendered[0, ..., :3].clamp(0.0, 1.0)
     target_image = target_image.clamp(0.0, 1.0)
     # Quick PSNR for the preview title
     psnr = -10 * torch.log10(((rendered_image - target_image) ** 2).mean())
 
-    fig, ax = plt.subplots(1, 3, figsize=(15, 5))
+    # Hierarchical runs also show the coarse render, so you can see what the fine pass adds
+    n_img = 3 if rendered_coarse is not None else 2
+    fig, ax = plt.subplots(1, n_img + 1, figsize=(5 * (n_img + 1), 5))
     ax[0].imshow(rendered_image.cpu().numpy())
-    ax[0].set_title(f"Render (iter {iteration}, PSNR {psnr:.2f} dB)")
-    ax[1].imshow(target_image.cpu().numpy())
-    ax[1].set_title("Ground truth")
-    ax[2].plot(hist_color, label="colour")
+    ax[0].set_title(f"{'Fine' if fine is not None else 'Render'} (iter {iteration}, PSNR {psnr:.2f} dB)")
+    col = 1
+    if rendered_coarse is not None:
+        coarse_image = rendered_coarse[0, ..., :3].clamp(0.0, 1.0)
+        psnr_c = -10 * torch.log10(((coarse_image - target_image) ** 2).mean())
+        ax[col].imshow(coarse_image.cpu().numpy())
+        ax[col].set_title(f"Coarse (PSNR {psnr_c:.2f} dB)")
+        col += 1
+    ax[col].imshow(target_image.cpu().numpy())
+    ax[col].set_title("Ground truth")
+    ax[-1].plot(hist_color, label="colour")
     if hist_sil:
-        ax[2].plot(hist_sil, label="silhouette")
-    ax[2].set_yscale("log")
-    ax[2].set_title("Training loss")
-    ax[2].legend()
-    for a in ax[:2]:
+        ax[-1].plot(hist_sil, label="silhouette")
+    ax[-1].set_yscale("log")
+    ax[-1].set_title("Training loss")
+    ax[-1].legend()
+    for a in ax[:-1]:
         a.axis("off")
     fig.tight_layout()
     fig.savefig(path)
     plt.close(fig)
 
 
-def save_checkpoint(model, iteration, loss_history, path):
-    """Saves the model weights together with the dataset name, so evaluate.py can check them."""
+def save_checkpoint(coarse, fine, iteration, loss_history, path):
+    """Saves the model weights with the dataset and sampler settings, so evaluate.py can check them."""
     torch.save(
         {
             "iteration": iteration,
             "dataset": ACTIVE_DATASET,
-            "model_state_dict": model.state_dict(),
+            "experiment": EXPERIMENT,
+            "sampler": {
+                "type": SAMPLER,
+                "stratified": STRATIFIED,
+                "n_pts_first_pass": N_PTS_FIRST_PASS,
+                "n_fine": N_FINE if HIERARCHICAL else 0,
+                "density_uses_delta": DENSITY_USES_DELTA,
+            },
+            "coarse_state_dict": coarse.state_dict(),
+            "fine_state_dict": fine.state_dict() if fine is not None else None,
             "loss_history": loss_history,
         },
         path,
     )
 
 
-def save_loss_history_csv(color, silhouette, total, path):
-    """Saves the losses with one row per iteration"""
+def save_loss_history_csv(color, silhouette, coarse_color, total, seconds, path):
+    """Saves the losses and the elapsed training time with one row per iteration."""
     with open(path, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
-        writer.writerow(["iteration", "color_loss", "silhouette_loss", "total_loss"])
-        for i, (c, t) in enumerate(zip(color, total)):
-            s = silhouette[i] if i < len(silhouette) else ""  # empty for poster, which has no silhouette loss
-            writer.writerow([i, c, s, t])
+        writer.writerow(["iteration", "color_loss", "silhouette_loss", "coarse_color_loss",
+                         "total_loss", "elapsed_s"])
+        for i, (c, t, s_el) in enumerate(zip(color, total, seconds)):
+            s = silhouette[i] if i < len(silhouette) else ""        # empty for poster
+            cc = coarse_color[i] if i < len(coarse_color) else ""   # empty for uniform sampling
+            writer.writerow([i, c, s, cc, t, f"{s_el:.2f}"])
 
 
 # Training
@@ -214,94 +296,91 @@ def main(
     config_copy = output_dir / "config_used.yaml"
     shutil.copy(CONFIG_PATH, config_copy)
     with open(config_copy, "a", encoding="utf-8") as f:
-        f.write(f"\n# This run: dataset = {ACTIVE_DATASET}, n_iter = {n_iter}\n")
+        f.write(f"\n# This run: dataset = {ACTIVE_DATASET}, experiment = {EXPERIMENT}, n_iter = {n_iter}\n")
 
     # Data
     print(f"Dataset: {ACTIVE_DATASET}  ({DATA_DIR})")
+    print(f"Experiment: {EXPERIMENT}  sampler={SAMPLER}, stratified={STRATIFIED}, "
+          f"density_uses_delta={DENSITY_USES_DELTA}, points per ray={N_PTS_FIRST_PASS}"
+          + (f" + {N_FINE} fine" if HIERARCHICAL else ""))
     target_images, target_silhouettes, target_cameras = load_train_split(device)
     n_images, height, width, _ = target_images.shape
     x_extent, y_extent = ndc_extent_for(height, width)
-    print(f"{n_images} training images at {width}x{height}, {n_iter} iterations")
+    print(f"{n_images} training images at {width}x{height}, {n_iter} iterations on {device}")
 
-    # Renderers
+    # Ray samplers and raymarcher
     raymarcher = EmissionAbsorptionRaymarcher()
-
-    # Random rays for each training step
-    raysampler_mc = MonteCarloRaysampler(
-        min_x=-x_extent,
-        max_x=x_extent,
-        min_y=-y_extent,
-        max_y=y_extent,
-        n_rays_per_image=N_RAYS_PER_IMAGE,
-        n_pts_per_ray=N_PTS_PER_RAY,
-        min_depth=RAY_MIN_DEPTH,
-        max_depth=RAY_MAX_DEPTH,
-    )
-    renderer_mc = ImplicitRenderer(raysampler=raysampler_mc, raymarcher=raymarcher).to(device)
-
-    # One ray per pixel for the full image previews
+    raysampler_mc = make_train_raysampler(x_extent, y_extent)
+    # One ray per pixel for the full image previews, never jittered
     raysampler_grid = NDCMultinomialRaysampler(
         image_height=height,
         image_width=width,
-        n_pts_per_ray=N_PTS_PER_RAY,
+        n_pts_per_ray=N_PTS_FIRST_PASS,
         min_depth=RAY_MIN_DEPTH,
         max_depth=RAY_MAX_DEPTH,
     )
-    renderer_grid = ImplicitRenderer(raysampler=raysampler_grid, raymarcher=raymarcher).to(device)
 
-    # Model and optimizer
-    model = NeuralRadianceField().to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
+    # Models and optimizer. Hierarchical sampling trains a separate fine model, as in NeRF
+    coarse = NeuralRadianceField().to(device)
+    fine = NeuralRadianceField().to(device) if HIERARCHICAL else None
+    params = list(coarse.parameters()) + (list(fine.parameters()) if fine is not None else [])
+    optimizer = torch.optim.Adam(params, lr=LEARNING_RATE)
     lr_decay_iteration = round(n_iter * LR_DECAY_AT)  # iteration where the learning rate drops
 
-    loss_history_color, loss_history_sil, loss_history_total = [], [], []
+    loss_history_color, loss_history_sil, loss_history_coarse, loss_history_total = [], [], [], []
+    elapsed = []
+    start_time = time.time()
+    extent = (x_extent, y_extent)
 
     for iteration in tqdm(range(n_iter), desc="Training"):
         if iteration == lr_decay_iteration:
             # Same as the baseline, a new optimizer with a lower learning rate
             tqdm.write(f"Decreasing LR by factor {LR_DECAY_FACTOR} ...")
-            optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE * LR_DECAY_FACTOR)
+            optimizer = torch.optim.Adam(params, lr=LEARNING_RATE * LR_DECAY_FACTOR)
 
         optimizer.zero_grad()
         # Picks BATCH_SIZE random training images
         batch_idx = torch.randperm(n_images)[:BATCH_SIZE]
         batch_cameras = select_cameras(target_cameras, batch_idx)
 
-        rendered, sampled_rays = renderer_mc(
-            cameras=batch_cameras, volumetric_function=model
+        # Random rays, then the coarse pass (and the fine pass if hierarchical)
+        ray_bundle = raysampler_mc(cameras=batch_cameras)
+        rendered, rendered_coarse = render_rays(
+            ray_bundle, coarse, fine, raymarcher, N_FINE, training=True
         )
-        # The render holds three colour channels and one opacity channel
-        rendered_images, rendered_silhouettes = rendered.split([3, 1], dim=-1)
 
-        # Real colours at the same pixels as the rendered rays
-        colors_at_rays = sample_images_at_mc_locs(
-            target_images[batch_idx], sampled_rays.xys, (x_extent, y_extent)
+        # Loss on the final render (the fine render if hierarchical)
+        color_err, sil_err = compute_losses(
+            rendered, ray_bundle.xys, target_images, target_silhouettes, batch_idx, extent
         )
-        color_err = huber(rendered_images, colors_at_rays).abs().mean()
-        loss = color_err
+        loss = color_err + (sil_err if sil_err is not None else 0.0)
 
-        # Only lego has an alpha channel for the silhouette loss
-        if USE_SILHOUETTE_LOSS:
-            silhouettes_at_rays = sample_images_at_mc_locs(
-                target_silhouettes[batch_idx, ..., None], sampled_rays.xys, (x_extent, y_extent)
+        # NeRF also trains the coarse model on the same targets, so its weights stay useful
+        if rendered_coarse is not None:
+            color_err_c, sil_err_c = compute_losses(
+                rendered_coarse, ray_bundle.xys, target_images, target_silhouettes, batch_idx, extent
             )
-            sil_err = huber(rendered_silhouettes, silhouettes_at_rays).abs().mean()
-            loss = loss + sil_err
-            loss_history_sil.append(sil_err.item())
+            loss = loss + color_err_c + (sil_err_c if sil_err_c is not None else 0.0)
+            loss_history_coarse.append(color_err_c.item())
 
+        if sil_err is not None:
+            loss_history_sil.append(sil_err.item())
         loss_history_color.append(color_err.item())
         loss_history_total.append(loss.item())
 
         loss.backward()
         optimizer.step()
+        elapsed.append(time.time() - start_time)
 
         # Saves a preview regularly and at the last iteration
         if iteration % vis_every == 0 or iteration == n_iter - 1:
             save_preview(
-                model,
+                coarse,
+                fine,
+                raysampler_grid,
+                raymarcher,
                 select_cameras(target_cameras, [PREVIEW_VIEW]),
                 target_images[PREVIEW_VIEW],
-                renderer_grid,
                 loss_history_color,
                 loss_history_sil,
                 iteration,
@@ -309,17 +388,21 @@ def main(
             )
 
         if iteration > 0 and iteration % checkpoint_every == 0:
-            save_checkpoint(model, iteration, loss_history_total, output_dir / "checkpoint.pt")
+            save_checkpoint(coarse, fine, iteration, loss_history_total, output_dir / "checkpoint.pt")
 
     # Final checkpoint and loss history for the report
-    save_checkpoint(model, n_iter, loss_history_total, output_dir / "checkpoint.pt")
+    save_checkpoint(coarse, fine, n_iter, loss_history_total, output_dir / "checkpoint.pt")
     save_loss_history_csv(
         loss_history_color,
         loss_history_sil,
+        loss_history_coarse,
         loss_history_total,
+        elapsed,
         output_dir / "loss_history.csv",
     )
-    print(f"Done. Outputs in {output_dir}")
+    total_time = time.time() - start_time
+    print(f"Done in {total_time / 60:.1f} min ({total_time / n_iter:.3f} s/iteration). "
+          f"Outputs in {output_dir}")
     return {"color": loss_history_color, "silhouette": loss_history_sil, "total": loss_history_total}
 
 

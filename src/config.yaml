@@ -35,12 +35,12 @@ model:
   n_hidden_neurons: 256
 
 render:
-  n_rays_per_image: 750
+  n_rays_per_image: 400
   n_pts_per_ray: 128
   n_batches_full_render: 16
 
 train:
-  batch_size: 6
+  batch_size: 2
   learning_rate: 0.001
   lr_decay_at: 0.75
   lr_decay_factor: 0.1
@@ -56,16 +56,16 @@ evaluation:
   loss_smoothing_window: 100
 
 smoke_test:
-  n_iter: 300
-  vis_every: 100
+  n_iter: 1000
+  vis_every: 250
   output_dir: outputs/src/smoke_test
   min_loss_drop: 0.3
 
-# --- final project additions (read by src only, once implemented) ---
-experiment: uniform                 # subfolder name per run, e.g. outputs/src/lego/uniform
+# --- final project additions 
+experiment: hier_64_128
 sampler:
-  type: uniform                     # uniform | hierarchical
-  stratified: false
+  type: hierarchical
+  stratified: true
   n_coarse: 64
   n_fine: 128
-  density_uses_delta: false         # true = NeRF eq. 3 (needed for hierarchical)
+  density_uses_delta: true
