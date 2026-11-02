@@ -7,7 +7,7 @@ datasets:
   lego:
     data_dir: data/lego
     output_dir: outputs/baseline/lego
-    n_iter: 10000
+    n_iter: 20000
     resize_to: [200, 200]
     znear: 0.01
     zfar: 10.0
@@ -19,7 +19,7 @@ datasets:
   poster:
     data_dir: data/poster
     output_dir: outputs/baseline/poster
-    n_iter: 20000
+    n_iter: 30000
     resize_to: null
     znear: 0.01
     zfar: 10.0
@@ -35,18 +35,18 @@ model:
   n_hidden_neurons: 256
 
 render:
-  n_rays_per_image: 750
+  n_rays_per_image: 400
   n_pts_per_ray: 128
   n_batches_full_render: 16
 
 train:
-  batch_size: 6
+  batch_size: 4
   learning_rate: 0.001
   lr_decay_at: 0.75
   lr_decay_factor: 0.1
   huber_scaling: 0.1
   seed: 1
-  vis_every: 500
+  vis_every: 2500
   checkpoint_every: 1000
 
 evaluation:
@@ -56,8 +56,8 @@ evaluation:
   loss_smoothing_window: 100
 
 smoke_test:
-  n_iter: 300
-  vis_every: 100
+  n_iter: 1000
+  vis_every: 250
   output_dir: outputs/baseline/smoke_test
   min_loss_drop: 0.3
-# This run: dataset = lego, n_iter = 10000
+# This run: dataset = lego, n_iter = 20000
