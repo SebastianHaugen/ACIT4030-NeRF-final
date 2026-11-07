@@ -3,6 +3,8 @@ __pycache__/
 *.py[codz]
 *$py.class
 
+baseline/report.tex
+
 # C extensions
 *.so
 

@@ -15,6 +15,21 @@ The baseline samples 128 evenly spaced points along every ray, so most samples l
 
 Code: `src/sampling.py` (weights and fine-sample drawing), `src/render.py` (coarse/fine rendering used by training, previews and evaluation), `src/model.py` (spacing-aware opacity).
 
+## Model and mip-NeRF 360 additions
+Also switchable in `src/config.yaml` (the defaults give the book model), or with the environment variable in brackets:
+
+| Setting | What it does |
+|---|---|
+| `model.n_harmonic_functions(_dir)`, `omega0`, `include_input` (`NERF_N_HARM`, `NERF_N_HARM_DIR`, `NERF_OMEGA0`, `NERF_INCLUDE_INPUT`) | NeRF positional encoding: L = 10 / 4 starting at pi, instead of 60 frequencies starting at 0.1 (most of which are float32 noise). |
+| `model.architecture: nerf` (`NERF_ARCH`) | 8-layer ReLU MLP with a skip connection, as in the NeRF paper. |
+| `sampler.type: proposal` (`NERF_SAMPLER`) | mip-NeRF 360 proposal sampling: a small density-only network on `n_coarse` samples, trained with the interlevel loss, decides where the NeRF model evaluates its `n_fine` samples. |
+| `train.distortion_weight` (`NERF_DIST_WEIGHT`) | mip-NeRF 360 distortion loss, pulls the weights on each ray together (fewer floaters). |
+| `sampler.spacing: lindisp` (`NERF_SPACING`) | Samples linear in depth up to `lindisp_switch`, then linear in disparity, so far-away space gets fewer samples. |
+| `sampler.contract` (`NERF_CONTRACT`) | mip-NeRF 360 scene contraction: points outside `contraction_radius` are squeezed into a shell, so a far `max_depth` (`NERF_MAX_DEPTH`) can be used. |
+| `model.appearance_dim` (`NERF_APPEARANCE_DIM`) | NeRF-W appearance code per training image (exposure / white balance). Test views use the mean code. |
+
+`run_improvements.ps1 -Dataset lego|poster` runs these as an ablation, one change at a time.
+
 Each run writes to `outputs/src/<dataset>/<experiment>/`. To run an experiment, set `experiment:` and the `sampler:` block in `src/config.yaml`, then:
 
     $env:NERF_DATASET="lego"; python -m src.train; python -m src.evaluate

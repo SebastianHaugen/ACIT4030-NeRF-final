@@ -3,10 +3,16 @@ preview:
 
 active_dataset: lego
 
+# Data fixes found during the final project (src/load_nerf_data.py):
+# lego RGB is multiplied by alpha, poster images are undistorted with square pixels.
+# Runs with the fixes go to output_dir_fixed, so they are never mixed with the earlier runs
+fix_data: true
+
 datasets:
   lego:
     data_dir: data/lego
     output_dir: outputs/src/lego
+    output_dir_fixed: outputs/src_fixed/lego
     n_iter: 20000                 
     resize_to: [200, 200]
     znear: 0.01
@@ -16,9 +22,15 @@ datasets:
     use_silhouette_loss: true
     test_every: null
     n_figure_views: 4
+    # Final project additions, only used if sampler.contract / sampler.spacing ask for them
+    contraction_center: [0.0, 0.0, 0.0]
+    contraction_radius: 4.5      # cameras are about 4 units from the origin
+    lindisp_switch: 4.0          # linear spacing up to this depth, disparity spacing after it
+    scene_bound: 1.5             # hash grid without contraction: the grid covers centre +- this box
   poster:
     data_dir: data/poster
     output_dir: outputs/src/poster
+    output_dir_fixed: outputs/src_fixed/poster
     n_iter: 30000
     resize_to: [480, 270]         
     znear: 0.01
@@ -28,11 +40,28 @@ datasets:
     use_silhouette_loss: false
     test_every: 8
     n_figure_views: 4
+    # Cameras are 3.0-4.5 units from the origin and look at a point about 4 units away (check_poster.py)
+    contraction_center: [0.0, 0.0, 0.0]
+    contraction_radius: 4.5      # everything inside this sphere is left as it is, the rest is contracted
+    lindisp_switch: 5.0          # linear spacing up to this depth, disparity spacing after it
+    scene_bound: 4.5             # hash grid without contraction (use contraction for poster instead)
 
 model:
-  n_harmonic_functions: 60
-  omega0: 0.1
+  n_harmonic_functions: 60        # positions. NeRF uses 10
+  n_harmonic_functions_dir: 60    # viewing directions. NeRF uses 4
+  omega0: 0.1                     # lowest frequency. NeRF uses pi (3.14159265)
+  include_input: false            # also feed the raw xyz / direction to the MLP, as NeRF does
   n_hidden_neurons: 256
+  architecture: book              # book (2 layers, as in the course book) | nerf (8 layers + skip, NeRF paper)
+                                  # | hashgrid (Instant-NGP hash encoding + tiny MLPs, as nerfacto)
+  hashgrid:                       # only used by architecture: hashgrid (nerfacto defaults)
+    levels: 16
+    features: 2                   # features per level
+    log2_table_size: 19           # hash table entries per level = 2^19
+    base_res: 16                  # coarsest grid, cells per side
+    max_res: 2048                 # finest grid, cells per side
+    hidden: 64                    # width of the tiny density and colour MLPs
+  appearance_dim: 0               # > 0: per-image appearance embedding (NeRF-W), 0 = off
 
 render:
   n_rays_per_image: 400
@@ -44,7 +73,13 @@ train:
   learning_rate: 0.001
   lr_decay_at: 0.75
   lr_decay_factor: 0.1
+  lr_schedule: step               # step (book: one drop at lr_decay_at) | exp (smooth decay to lr_final, as NeRF)
+  lr_final: 0.00001               # exp only: learning rate at the last iteration
+  lr_warmup: 0                    # exp only: iterations of linear warm-up from 0 (mip-NeRF 360 uses 512)
+  adam_eps: 0.00000001            # Adam epsilon. Hash grids use 1e-15 (Instant-NGP), most table entries get tiny gradients
   huber_scaling: 0.1
+  distortion_weight: 0.0          # mip-NeRF 360 distortion loss, the paper uses 0.01. 0 = off
+  interlevel_weight: 1.0          # proposal loss (only used with sampler.type: proposal)
   seed: 1
   vis_every: 2500
   checkpoint_every: 1000
@@ -53,6 +88,7 @@ evaluation:
   max_test_views: 25
   lpips_net: vgg
   figures_dir: outputs/src/figures
+  figures_dir_fixed: outputs/src_fixed/figures
   loss_smoothing_window: 100
 
 smoke_test:
@@ -64,8 +100,11 @@ smoke_test:
 # --- final project additions 
 experiment: uniform               
 sampler:
-  type: uniform
+  type: uniform                   # uniform | hierarchical (NeRF) | proposal (mip-NeRF 360)
   stratified: false
-  n_coarse: 64
-  n_fine: 128
+  n_coarse: 64                    # first pass of hierarchical / proposal
+  n_fine: 128                     # hierarchical: extra samples, proposal: samples for the NeRF model
   density_uses_delta: false
+  spacing: linear                 # linear | disparity | lindisp (linear near the camera, disparity further away)
+  contract: false                 # mip-NeRF 360 scene contraction of the sample points
+  proposal_hidden: 128            # width of the small proposal MLP

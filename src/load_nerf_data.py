@@ -6,7 +6,36 @@ from PIL import Image
 from pytorch3d.renderer import FoVPerspectiveCameras
 import torch.nn.functional as F
 
-def load_nerf_data(data_dir, split="train", device="cpu", znear=0.01, zfar=10.0, resize_to=None):
+
+def undistortion_grid(fx, fy, cx, cy, k1, k2, p1, p2, width, height, device):
+    """Sampling grid for grid_sample that undistorts an image (OpenCV / COLMAP OPENCV model).
+
+    The undistorted image gets square pixels with focal length fy in both directions and the
+    principal point in the image centre, which is what FoVPerspectiveCameras assumes. For every
+    pixel of that image we apply the lens distortion to find where it lies in the original photo,
+    so no iterative inversion of the distortion is needed.
+    """
+    v, u = torch.meshgrid(
+        torch.arange(height, device=device, dtype=torch.float32) + 0.5,
+        torch.arange(width, device=device, dtype=torch.float32) + 0.5,
+        indexing="ij",
+    )
+    # Normalised camera coordinates of the undistorted (ideal) image
+    x = (u - width / 2) / fy
+    y = (v - height / 2) / fy
+    r2 = x * x + y * y
+    radial = 1 + k1 * r2 + k2 * r2 * r2
+    x_d = x * radial + 2 * p1 * x * y + p2 * (r2 + 2 * x * x)
+    y_d = y * radial + p1 * (r2 + 2 * y * y) + 2 * p2 * x * y
+    # Pixel position in the original photo, then in grid_sample's [-1, 1] coordinates
+    u_src = fx * x_d + cx
+    v_src = fy * y_d + cy
+    grid = torch.stack([u_src / width * 2 - 1, v_src / height * 2 - 1], dim=-1)
+    return grid[None]  # (1, H, W, 2)
+
+
+def load_nerf_data(data_dir, split="train", device="cpu", znear=0.01, zfar=10.0, resize_to=None,
+                   premultiply_alpha=False, undistort=False):
     """
     Loads NeRF-style dataset (e.g., Lego, Nerfstudio output) from the specified directory and split.
 
@@ -18,6 +47,8 @@ def load_nerf_data(data_dir, split="train", device="cpu", znear=0.01, zfar=10.0,
         zfar (float): The far clip plane distance for the cameras.
         resize_to (tuple, optional): A tuple (height, width) to resize the images to.
                                      If None, images are loaded at their original resolution.
+        premultiply_alpha (bool): Multiply RGBA colours by alpha (object over black, as rendered).
+        undistort (bool): Remove lens distortion and use square pixels (needs fl_x, fl_y, k1, k2, p1, p2).
 
     Returns:
         tuple: A tuple containing:
@@ -70,6 +101,22 @@ def load_nerf_data(data_dir, split="train", device="cpu", znear=0.01, zfar=10.0,
     # If not present, we can just use the current_image_width/height as the base for scaling.
     full_res_w = transforms_data.get('w', current_image_width)
     full_res_h = transforms_data.get('h', current_image_height)
+
+    # Final project fix: real cameras (poster) have lens distortion and slightly different focal
+    # lengths in x and y, which FoVPerspectiveCameras cannot represent. The images are resampled
+    # once at full resolution to an ideal pinhole camera with square pixels (focal length fl_y)
+    undistort_grid = None
+    distortion_keys = ('fl_x', 'fl_y', 'cx', 'cy', 'k1', 'k2', 'p1', 'p2')
+    if undistort and all(k in transforms_data for k in distortion_keys):
+        s = current_image_width / full_res_w  # in case the images on disk are already downscaled
+        undistort_grid = undistortion_grid(
+            transforms_data['fl_x'] * s, transforms_data['fl_y'] * s,
+            transforms_data['cx'] * s, transforms_data['cy'] * s,
+            transforms_data['k1'], transforms_data['k2'], transforms_data['p1'], transforms_data['p2'],
+            current_image_width, current_image_height, device,
+        )
+        print(f"Undistorting images (k1={transforms_data['k1']:.4f}, k2={transforms_data['k2']:.4f}, "
+              f"p1={transforms_data['p1']:.4f}, p2={transforms_data['p2']:.4f}) to square pixels (f = fl_y)")
 
     # Determine target dimensions for resizing and FOV calculation
     if resize_to:
@@ -145,6 +192,18 @@ def load_nerf_data(data_dir, split="train", device="cpu", znear=0.01, zfar=10.0,
         # Convert to tensor and apply resizing if specified
         image_rgb_tensor = torch.from_numpy(image_rgb).to(device) # (H, W, C)
         silhouette_tensor = torch.from_numpy(silhouette).to(device) # (H, W)
+
+        # Final project fix: PNG colours are not multiplied by alpha, but the renderer composites
+        # onto black, so semi-transparent edge pixels could never be matched. Premultiplying
+        # gives the target the model can actually render (the object over a black background)
+        if premultiply_alpha:
+            image_rgb_tensor = image_rgb_tensor * silhouette_tensor[..., None]
+
+        if undistort_grid is not None:
+            image_rgb_tensor = F.grid_sample(
+                image_rgb_tensor.permute(2, 0, 1)[None], undistort_grid,
+                mode='bilinear', padding_mode='border', align_corners=False,
+            )[0].permute(1, 2, 0)
 
         if resize_to:
             # Reshape from (H, W, C) to (1, C, H, W) for interpolation

@@ -4,12 +4,18 @@ All settings are read from config.yaml, and the NERF_DATASET / NERF_EXPERIMENT v
 the dataset and experiment for one run.
 
 Final project additions:
-- sampler.type: uniform (one model, like the baseline) or hierarchical (coarse + fine model, NeRF Sec. 5.2)
+- sampler.type: uniform (one model, like the baseline), hierarchical (coarse + fine model, NeRF Sec. 5.2)
+  or proposal (small proposal network + NeRF model, mip-NeRF 360 Sec. 3)
 - sampler.stratified: random jitter of the sample depths during training
 - sampler.density_uses_delta: opacity depends on the sample spacing (see model.py)
+- sampler.spacing / sampler.contract: lin-disp spacing and scene contraction (mip-NeRF 360 Sec. 2)
+- model.*: NeRF positional encoding and 8-layer MLP, per-image appearance codes (NeRF-W)
+- train.distortion_weight: distortion loss (mip-NeRF 360 Sec. 4)
 """
 import csv
+import math
 import time
+from dataclasses import asdict
 
 import yaml
 
@@ -26,8 +32,9 @@ from pytorch3d.renderer import (
 )
 
 from src.load_nerf_data import load_nerf_data
-from src.model import NeuralRadianceField
-from src.render import render_rays
+from src.model import NeuralRadianceField, ProposalField
+from src.render import render_rays, SamplerSettings, SAMPLERS
+from src.sampling import interlevel_loss, distortion_loss, lengths_to_edges, t_to_s, SPACINGS
 from src.repo_util.LoadConfigurations import (
     CONFIG,
     ACTIVE_DATASET,
@@ -57,15 +64,87 @@ from src.repo_util.LoadConfigurations import (
     N_FINE,
     DENSITY_USES_DELTA,
     EXPERIMENT,
+    N_HARMONIC_FUNCTIONS,
+    N_HARMONIC_FUNCTIONS_DIR,
+    HARMONIC_OMEGA0,
+    INCLUDE_INPUT,
+    N_HIDDEN_NEURONS,
+    ARCHITECTURE,
+    APPEARANCE_DIM,
+    SPACING,
+    CONTRACT,
+    CONTRACTION_CENTER,
+    CONTRACTION_RADIUS,
+    LINDISP_SWITCH,
+    PROPOSAL_HIDDEN,
+    DISTORTION_WEIGHT,
+    INTERLEVEL_WEIGHT,
+    LR_SCHEDULE,
+    LR_FINAL,
+    LR_WARMUP,
+    FIX_DATA,
+    SCENE_BOUND,
+    HASHGRID,
+    ADAM_EPS,
 )
 
 PREVIEW_VIEW = 0  # the same training view in every preview, so they can be compared over time
-HIERARCHICAL = SAMPLER == "hierarchical"
-if SAMPLER not in ("uniform", "hierarchical"):
-    raise ValueError(f"Unknown sampler.type '{SAMPLER}', expected 'uniform' or 'hierarchical'")
+if SAMPLER not in SAMPLERS:
+    raise ValueError(f"Unknown sampler.type '{SAMPLER}', expected one of {SAMPLERS}")
+if SPACING not in SPACINGS:
+    raise ValueError(f"Unknown sampler.spacing '{SPACING}', expected one of {SPACINGS}")
+if (SAMPLER == "proposal" or SPACING != "linear") and not DENSITY_USES_DELTA:
+    raise ValueError("Proposal sampling and non-linear spacing give unevenly spaced samples, "
+                     "so they need sampler.density_uses_delta: true")
+if LR_SCHEDULE not in ("step", "exp"):
+    raise ValueError(f"Unknown train.lr_schedule '{LR_SCHEDULE}', expected 'step' or 'exp'")
+if ARCHITECTURE == "hashgrid" and not DENSITY_USES_DELTA:
+    raise ValueError("architecture: hashgrid predicts a density per unit length, so it needs "
+                     "sampler.density_uses_delta: true")
 
-# Uniform uses n_pts_per_ray samples, hierarchical uses n_coarse in the first pass (+ n_fine in the second)
-N_PTS_FIRST_PASS = N_COARSE if HIERARCHICAL else N_PTS_PER_RAY
+# Uniform uses n_pts_per_ray samples, the two-pass samplers use n_coarse in the first pass
+TWO_PASS = SAMPLER != "uniform"
+N_PTS_FIRST_PASS = N_COARSE if TWO_PASS else N_PTS_PER_RAY
+
+SAMPLER_SETTINGS = SamplerSettings(
+    type=SAMPLER,
+    n_first=N_PTS_FIRST_PASS,
+    n_fine=N_FINE if TWO_PASS else 0,
+    min_depth=RAY_MIN_DEPTH,
+    max_depth=RAY_MAX_DEPTH,
+    spacing=SPACING,
+    lindisp_switch=LINDISP_SWITCH,
+    stratified=STRATIFIED,
+)
+
+# Saved in the checkpoint, so evaluate.py rebuilds exactly the same networks
+NERF_KWARGS = dict(
+    n_harmonic_functions=N_HARMONIC_FUNCTIONS,
+    n_hidden_neurons=N_HIDDEN_NEURONS,
+    omega0=HARMONIC_OMEGA0,
+    density_uses_delta=DENSITY_USES_DELTA,
+    n_harmonic_functions_dir=N_HARMONIC_FUNCTIONS_DIR,
+    include_input=INCLUDE_INPUT,
+    architecture=ARCHITECTURE,
+    appearance_dim=APPEARANCE_DIM,
+    contract=CONTRACT,
+    contraction_center=CONTRACTION_CENTER,
+    contraction_radius=CONTRACTION_RADIUS,
+    scene_bound=SCENE_BOUND,
+    hashgrid=HASHGRID,
+)
+PROPOSAL_KWARGS = dict(
+    n_harmonic_functions=N_HARMONIC_FUNCTIONS,
+    omega0=HARMONIC_OMEGA0,
+    include_input=INCLUDE_INPUT,
+    n_hidden_neurons=PROPOSAL_HIDDEN,
+    contract=CONTRACT,
+    contraction_center=CONTRACTION_CENTER,
+    contraction_radius=CONTRACTION_RADIUS,
+    # A hash-grid NeRF gets a small hash-grid proposal network, as in nerfacto
+    architecture="hashgrid" if ARCHITECTURE == "hashgrid" else "mlp",
+    scene_bound=SCENE_BOUND,
+)
 
 
 # Helper functions, huber and sample_images_at_mc_locs come from the baseline
@@ -142,6 +221,8 @@ def load_train_split(device):
         znear=CAMERA_ZNEAR,
         zfar=CAMERA_ZFAR,
         resize_to=RESIZE_TO,
+        premultiply_alpha=FIX_DATA,
+        undistort=FIX_DATA,
     )
     # Bicubic resizing can give values slightly below 0 or above 1
     images = images.clamp(0.0, 1.0)
@@ -173,7 +254,8 @@ def make_train_raysampler(x_extent, y_extent):
         min_depth=RAY_MIN_DEPTH,
         max_depth=RAY_MAX_DEPTH,
     )
-    if STRATIFIED:
+    # With a non-linear spacing, render_rays replaces the depths and does the jitter itself
+    if STRATIFIED and SPACING == "linear":
         kwargs["stratified_sampling"] = True
     try:
         return MonteCarloRaysampler(**kwargs)
@@ -202,14 +284,61 @@ def compute_losses(rendered, xys, target_images, target_silhouettes, batch_idx, 
     return color_err, sil_err
 
 
-def save_preview(coarse, fine, raysampler_grid, raymarcher, camera, target_image,
+def exp_learning_rate(iteration, n_iter):
+    """Smooth learning-rate schedule (train.lr_schedule: exp), as in NeRF and mip-NeRF 360.
+
+    Decays log-linearly from learning_rate to lr_final over the run, after an optional linear
+    warm-up over the first lr_warmup iterations, which keeps the deep MLP stable at the start.
+    """
+    progress = iteration / max(1, n_iter - 1)
+    lr = math.exp((1 - progress) * math.log(LEARNING_RATE) + progress * math.log(LR_FINAL))
+    if LR_WARMUP > 0:
+        lr *= min(1.0, (iteration + 1) / LR_WARMUP)
+    return lr
+
+
+def ray_distortion_loss(out, settings):
+    """Distortion loss on the final weights, measured in the normalised distance s (mip-NeRF 360)."""
+    s_edges = t_to_s(
+        lengths_to_edges(out["lengths"].detach()),
+        settings.spacing, settings.min_depth, settings.max_depth, settings.lindisp_switch,
+    )
+    return distortion_loss(s_edges, out["weights"])
+
+
+def build_models(settings, nerf_kwargs, proposal_kwargs, n_images, device):
+    """Creates the networks for the sampler type.
+
+    Returns (first, second, appearance):
+        uniform:      NeRF, None, ...
+        hierarchical: coarse NeRF, fine NeRF, ...
+        proposal:     ProposalField, NeRF, ...
+    appearance is an embedding with one code per training image, or None if appearance_dim is 0.
+    """
+    if settings.type == "proposal":
+        first = ProposalField(**proposal_kwargs).to(device)
+    else:
+        first = NeuralRadianceField(**nerf_kwargs).to(device)
+    second = NeuralRadianceField(**nerf_kwargs).to(device) if settings.type != "uniform" else None
+    appearance = None
+    if nerf_kwargs.get("appearance_dim", 0) > 0:
+        appearance = torch.nn.Embedding(n_images, nerf_kwargs["appearance_dim"]).to(device)
+    return first, second, appearance
+
+
+def save_preview(first, second, appearance, raysampler_grid, raymarcher, camera, target_image,
                  hist_color, hist_sil, iteration, path):
     """Saves a full render of one training view next to the ground truth and the loss curves."""
     with torch.no_grad():
         ray_bundle = raysampler_grid(cameras=camera)
-        rendered, rendered_coarse = render_rays(
-            ray_bundle, coarse, fine, raymarcher, N_FINE, training=False, chunked=True
+        codes = None
+        if appearance is not None:
+            codes = appearance(torch.tensor([PREVIEW_VIEW], device=target_image.device))
+        out = render_rays(
+            ray_bundle, first, second, raymarcher, SAMPLER_SETTINGS, training=False, chunked=True,
+            appearance_codes=codes,
         )
+    rendered, rendered_coarse = out["rgba"], out["rgba_coarse"]
     rendered_image = rendered[0, ..., :3].clamp(0.0, 1.0)
     target_image = target_image.clamp(0.0, 1.0)
     # Quick PSNR for the preview title
@@ -219,7 +348,7 @@ def save_preview(coarse, fine, raysampler_grid, raymarcher, camera, target_image
     n_img = 3 if rendered_coarse is not None else 2
     fig, ax = plt.subplots(1, n_img + 1, figsize=(5 * (n_img + 1), 5))
     ax[0].imshow(rendered_image.cpu().numpy())
-    ax[0].set_title(f"{'Fine' if fine is not None else 'Render'} (iter {iteration}, PSNR {psnr:.2f} dB)")
+    ax[0].set_title(f"{'Fine' if second is not None else 'Render'} (iter {iteration}, PSNR {psnr:.2f} dB)")
     col = 1
     if rendered_coarse is not None:
         coarse_image = rendered_coarse[0, ..., :3].clamp(0.0, 1.0)
@@ -242,38 +371,43 @@ def save_preview(coarse, fine, raysampler_grid, raymarcher, camera, target_image
     plt.close(fig)
 
 
-def save_checkpoint(coarse, fine, iteration, loss_history, path):
-    """Saves the model weights with the dataset and sampler settings, so evaluate.py can check them."""
+def save_checkpoint(first, second, appearance, iteration, loss_history, path):
+    """Saves the model weights with the dataset, sampler and model settings, so evaluate.py can
+    rebuild exactly the same networks."""
+    proposal = SAMPLER == "proposal"
     torch.save(
         {
             "iteration": iteration,
             "dataset": ACTIVE_DATASET,
             "experiment": EXPERIMENT,
-            "sampler": {
-                "type": SAMPLER,
-                "stratified": STRATIFIED,
-                "n_pts_first_pass": N_PTS_FIRST_PASS,
-                "n_fine": N_FINE if HIERARCHICAL else 0,
-                "density_uses_delta": DENSITY_USES_DELTA,
-            },
-            "coarse_state_dict": coarse.state_dict(),
-            "fine_state_dict": fine.state_dict() if fine is not None else None,
+            "fix_data": FIX_DATA,
+            "sampler": asdict(SAMPLER_SETTINGS),
+            "nerf_kwargs": NERF_KWARGS,
+            "proposal_kwargs": PROPOSAL_KWARGS if proposal else None,
+            # uniform: the only model, hierarchical: the coarse model
+            "coarse_state_dict": first.state_dict() if not proposal else None,
+            "proposal_state_dict": first.state_dict() if proposal else None,
+            # hierarchical: the fine model, proposal: the NeRF model
+            "fine_state_dict": second.state_dict() if second is not None else None,
+            "appearance_state_dict": appearance.state_dict() if appearance is not None else None,
             "loss_history": loss_history,
         },
         path,
     )
 
 
-def save_loss_history_csv(color, silhouette, coarse_color, total, seconds, path):
+def save_loss_history_csv(color, silhouette, coarse_color, interlevel, distortion, total, seconds, path):
     """Saves the losses and the elapsed training time with one row per iteration."""
     with open(path, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
         writer.writerow(["iteration", "color_loss", "silhouette_loss", "coarse_color_loss",
-                         "total_loss", "elapsed_s"])
+                         "total_loss", "elapsed_s", "interlevel_loss", "distortion_loss"])
         for i, (c, t, s_el) in enumerate(zip(color, total, seconds)):
             s = silhouette[i] if i < len(silhouette) else ""        # empty for poster
-            cc = coarse_color[i] if i < len(coarse_color) else ""   # empty for uniform sampling
-            writer.writerow([i, c, s, cc, t, f"{s_el:.2f}"])
+            cc = coarse_color[i] if i < len(coarse_color) else ""   # empty unless hierarchical
+            il = interlevel[i] if i < len(interlevel) else ""       # empty unless proposal
+            d = distortion[i] if i < len(distortion) else ""        # empty if the distortion loss is off
+            writer.writerow([i, c, s, cc, t, f"{s_el:.2f}", il, d])
 
 
 # Training
@@ -301,10 +435,16 @@ def main(
         f.write(f"\n# This run: dataset = {ACTIVE_DATASET}, experiment = {EXPERIMENT}, n_iter = {n_iter}\n")
 
     # Data
-    print(f"Dataset: {ACTIVE_DATASET}  ({DATA_DIR})")
+    print(f"Dataset: {ACTIVE_DATASET}  ({DATA_DIR}), data fixes: {'on' if FIX_DATA else 'off'}")
     print(f"Experiment: {EXPERIMENT}  sampler={SAMPLER}, stratified={STRATIFIED}, "
           f"density_uses_delta={DENSITY_USES_DELTA}, points per ray={N_PTS_FIRST_PASS}"
-          + (f" + {N_FINE} fine" if HIERARCHICAL else ""))
+          + (f" + {N_FINE} fine" if SAMPLER == "hierarchical" else "")
+          + (f" -> {N_FINE} NeRF samples" if SAMPLER == "proposal" else "")
+          + f", spacing={SPACING}, contract={CONTRACT}")
+    print(f"Model: {ARCHITECTURE}, L={N_HARMONIC_FUNCTIONS}/{N_HARMONIC_FUNCTIONS_DIR}, omega0={HARMONIC_OMEGA0}, "
+          f"include_input={INCLUDE_INPUT}, appearance_dim={APPEARANCE_DIM}, lr={LEARNING_RATE} ({LR_SCHEDULE}"
+          + (f" -> {LR_FINAL}, warm-up {LR_WARMUP}" if LR_SCHEDULE == "exp" else "")
+          + f"), distortion_weight={DISTORTION_WEIGHT}, rays per step={BATCH_SIZE}x{N_RAYS_PER_IMAGE}")
     target_images, target_silhouettes, target_cameras = load_train_split(device)
     n_images, height, width, _ = target_images.shape
     x_extent, y_extent = ndc_extent_for(height, width)
@@ -322,14 +462,15 @@ def main(
         max_depth=RAY_MAX_DEPTH,
     )
 
-    # Models and optimizer. Hierarchical sampling trains a separate fine model, as in NeRF
-    coarse = NeuralRadianceField().to(device)
-    fine = NeuralRadianceField().to(device) if HIERARCHICAL else None
-    params = list(coarse.parameters()) + (list(fine.parameters()) if fine is not None else [])
-    optimizer = torch.optim.Adam(params, lr=LEARNING_RATE)
+    # Models and optimizer. Hierarchical sampling trains a separate fine model, as in NeRF,
+    # proposal sampling trains a small proposal network next to the NeRF model
+    first, second, appearance = build_models(SAMPLER_SETTINGS, NERF_KWARGS, PROPOSAL_KWARGS, n_images, device)
+    params = [p for m in (first, second, appearance) if m is not None for p in m.parameters()]
+    optimizer = torch.optim.Adam(params, lr=LEARNING_RATE, eps=ADAM_EPS)
     lr_decay_iteration = round(n_iter * LR_DECAY_AT)  # iteration where the learning rate drops
 
     loss_history_color, loss_history_sil, loss_history_coarse, loss_history_total = [], [], [], []
+    loss_history_interlevel, loss_history_dist = [], []
     elapsed = []              # cumulative training time per iteration, for the wall-clock plots
     train_seconds = 0.0       # counts only the training steps, not previews or checkpoints
     start_time = time.time()
@@ -337,35 +478,54 @@ def main(
 
     for iteration in tqdm(range(n_iter), desc="Training"):
         step_start = time.time()
-        if iteration == lr_decay_iteration:
+        if LR_SCHEDULE == "exp":
+            for group in optimizer.param_groups:
+                group["lr"] = exp_learning_rate(iteration, n_iter)
+        elif iteration == lr_decay_iteration:
             # Same as the baseline, a new optimizer with a lower learning rate
             tqdm.write(f"Decreasing LR by factor {LR_DECAY_FACTOR} ...")
-            optimizer = torch.optim.Adam(params, lr=LEARNING_RATE * LR_DECAY_FACTOR)
+            optimizer = torch.optim.Adam(params, lr=LEARNING_RATE * LR_DECAY_FACTOR, eps=ADAM_EPS)
 
         optimizer.zero_grad()
         # Picks BATCH_SIZE random training images
         batch_idx = torch.randperm(n_images)[:BATCH_SIZE]
         batch_cameras = select_cameras(target_cameras, batch_idx)
+        # The appearance code of each image in the batch (NeRF-W)
+        codes = appearance(batch_idx.to(device)) if appearance is not None else None
 
-        # Random rays, then the coarse pass (and the fine pass if hierarchical)
+        # Random rays, then the first pass (and the second pass for hierarchical / proposal)
         ray_bundle = raysampler_mc(cameras=batch_cameras)
-        rendered, rendered_coarse = render_rays(
-            ray_bundle, coarse, fine, raymarcher, N_FINE, training=True
+        out = render_rays(
+            ray_bundle, first, second, raymarcher, SAMPLER_SETTINGS, training=True, appearance_codes=codes
         )
 
-        # Loss on the final render (the fine render if hierarchical)
+        # Loss on the final render (the fine / NeRF render for the two-pass samplers)
         color_err, sil_err = compute_losses(
-            rendered, ray_bundle.xys, target_images, target_silhouettes, batch_idx, extent
+            out["rgba"], ray_bundle.xys, target_images, target_silhouettes, batch_idx, extent
         )
         loss = color_err + (sil_err if sil_err is not None else 0.0)
 
         # NeRF also trains the coarse model on the same targets, so its weights stay useful
-        if rendered_coarse is not None:
+        if out["rgba_coarse"] is not None:
             color_err_c, sil_err_c = compute_losses(
-                rendered_coarse, ray_bundle.xys, target_images, target_silhouettes, batch_idx, extent
+                out["rgba_coarse"], ray_bundle.xys, target_images, target_silhouettes, batch_idx, extent
             )
             loss = loss + color_err_c + (sil_err_c if sil_err_c is not None else 0.0)
             loss_history_coarse.append(color_err_c.item())
+
+        # The proposal network only learns to cover the NeRF weights (mip-NeRF 360, eq. 14)
+        if out["proposal_weights"] is not None:
+            inter_err = interlevel_loss(
+                out["lengths"], out["weights"], out["proposal_lengths"], out["proposal_weights"]
+            )
+            loss = loss + INTERLEVEL_WEIGHT * inter_err
+            loss_history_interlevel.append(inter_err.item())
+
+        # Pulls the weights on each ray together, against floaters (mip-NeRF 360, eq. 15)
+        if DISTORTION_WEIGHT > 0:
+            dist_err = ray_distortion_loss(out, SAMPLER_SETTINGS)
+            loss = loss + DISTORTION_WEIGHT * dist_err
+            loss_history_dist.append(dist_err.item())
 
         if sil_err is not None:
             loss_history_sil.append(sil_err.item())
@@ -382,8 +542,9 @@ def main(
         # Saves a preview regularly and at the last iteration
         if iteration % vis_every == 0 or iteration == n_iter - 1:
             save_preview(
-                coarse,
-                fine,
+                first,
+                second,
+                appearance,
                 raysampler_grid,
                 raymarcher,
                 select_cameras(target_cameras, [PREVIEW_VIEW]),
@@ -395,14 +556,17 @@ def main(
             )
 
         if iteration > 0 and iteration % checkpoint_every == 0:
-            save_checkpoint(coarse, fine, iteration, loss_history_total, output_dir / "checkpoint.pt")
+            save_checkpoint(first, second, appearance, iteration, loss_history_total,
+                            output_dir / "checkpoint.pt")
 
     # Final checkpoint and loss history for the report
-    save_checkpoint(coarse, fine, n_iter, loss_history_total, output_dir / "checkpoint.pt")
+    save_checkpoint(first, second, appearance, n_iter, loss_history_total, output_dir / "checkpoint.pt")
     save_loss_history_csv(
         loss_history_color,
         loss_history_sil,
         loss_history_coarse,
+        loss_history_interlevel,
+        loss_history_dist,
         loss_history_total,
         elapsed,
         output_dir / "loss_history.csv",

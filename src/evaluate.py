@@ -1,7 +1,8 @@
 """
 Evaluates a trained NeRF on the held-out test views of the active dataset.
 Run from the project root after training with python -m src.evaluate
-Works for both uniform (coarse only) and hierarchical (coarse + fine) checkpoints.
+Works for uniform, hierarchical and proposal checkpoints. The networks and sampler settings are
+rebuilt from the checkpoint, so evaluation always renders the same way as training did.
 """
 import csv
 import statistics
@@ -15,10 +16,9 @@ from pytorch3d.renderer import (
 )
 
 from src.load_nerf_data import load_nerf_data
-from src.model import NeuralRadianceField
 from src.metrics import psnr, ssim, LPIPSMetric
-from src.render import render_rays
-from src.train import select_cameras, fix_fov_for_aspect
+from src.render import render_rays, SamplerSettings
+from src.train import select_cameras, fix_fov_for_aspect, build_models
 from src.repo_util.LoadConfigurations import (
     ACTIVE_DATASET,
     DATA_DIR,
@@ -29,13 +29,12 @@ from src.repo_util.LoadConfigurations import (
     CAMERA_ZFAR,
     RAY_MIN_DEPTH,
     RAY_MAX_DEPTH,
-    N_PTS_PER_RAY,
-    N_COARSE,
-    N_FINE,
+    DENSITY_USES_DELTA,
     TEST_EVERY,
     MAX_TEST_VIEWS,
     N_FIGURE_VIEWS,
     EXPERIMENT,
+    FIX_DATA,
 )
 
 IEEE_TEXT_WIDTH_IN = 7.16    # full page width of an IEEE two-column paper in inches
@@ -49,6 +48,7 @@ def load_test_split(device):
         images, _, cameras = load_nerf_data(
             str(DATA_DIR), split="train", device=device,
             znear=CAMERA_ZNEAR, zfar=CAMERA_ZFAR, resize_to=RESIZE_TO,
+            premultiply_alpha=FIX_DATA, undistort=FIX_DATA,
         )
         all_idx = torch.arange(len(images))
         test_idx = all_idx[all_idx % TEST_EVERY == 0]
@@ -57,6 +57,7 @@ def load_test_split(device):
         images, _, cameras = load_nerf_data(
             str(DATA_DIR), split="test", device=device,
             znear=CAMERA_ZNEAR, zfar=CAMERA_ZFAR, resize_to=RESIZE_TO,
+            premultiply_alpha=FIX_DATA, undistort=FIX_DATA,
         )
         test_idx = torch.arange(len(images))
 
@@ -73,7 +74,11 @@ def load_test_split(device):
 
 
 def load_model(device):
-    """Loads the coarse model, and the fine model if the run used hierarchical sampling."""
+    """Loads the networks and the sampler settings of the trained run.
+
+    Returns (first, second, appearance_code, settings), see build_models in train.py.
+    appearance_code is the mean of the training codes (test views have no code of their own), or None.
+    """
     checkpoint_path = OUTPUT_DIR / "checkpoint.pt"
     if not checkpoint_path.exists():
         raise FileNotFoundError(f"No checkpoint at {checkpoint_path}. Train first: python -m src.train")
@@ -84,23 +89,55 @@ def load_model(device):
             f"Checkpoint was trained on '{checkpoint.get('dataset')}', "
             f"but active_dataset is '{ACTIVE_DATASET}'."
         )
+    # The test images must be loaded the same way as the training images were
+    if checkpoint.get("fix_data", False) != FIX_DATA:
+        raise ValueError(f"Checkpoint was trained with fix_data={checkpoint.get('fix_data', False)}, "
+                         f"but fix_data is {FIX_DATA} now. Set NERF_FIX_DATA to match.")
+
+    sampler = checkpoint.get("sampler") or {}
+    if "n_first" in sampler:
+        settings = SamplerSettings(**sampler)
+        nerf_kwargs = checkpoint["nerf_kwargs"]
+    else:
+        # Checkpoints from before the proposal/spacing changes: book model, linear spacing
+        is_hier = checkpoint.get("fine_state_dict") is not None
+        settings = SamplerSettings(
+            type="hierarchical" if is_hier else "uniform",
+            n_first=sampler.get("n_pts_first_pass", 128),
+            n_fine=sampler.get("n_fine", 0),
+            min_depth=RAY_MIN_DEPTH,
+            max_depth=RAY_MAX_DEPTH,
+        )
+        nerf_kwargs = {"density_uses_delta": sampler.get("density_uses_delta", DENSITY_USES_DELTA),
+                       "architecture": "book", "n_harmonic_functions": 60, "n_harmonic_functions_dir": 60,
+                       "omega0": 0.1, "include_input": False, "appearance_dim": 0, "contract": False}
+
+    appearance_state = checkpoint.get("appearance_state_dict")
+    n_codes = appearance_state["weight"].shape[0] if appearance_state is not None else 0
+    first, second, appearance = build_models(
+        settings, nerf_kwargs, checkpoint.get("proposal_kwargs") or {}, n_codes, device
+    )
 
     # Older baseline-style checkpoints only have model_state_dict, which is the coarse model
-    coarse_state = checkpoint.get("coarse_state_dict", checkpoint.get("model_state_dict"))
-    coarse = NeuralRadianceField().to(device)
-    coarse.load_state_dict(coarse_state)
-    coarse.eval()
+    if settings.type == "proposal":
+        first.load_state_dict(checkpoint["proposal_state_dict"])
+    else:
+        first.load_state_dict(checkpoint.get("coarse_state_dict") or checkpoint["model_state_dict"])
+    if second is not None:
+        second.load_state_dict(checkpoint["fine_state_dict"])
 
-    # Only hierarchical runs have a fine model
-    fine = None
-    if checkpoint.get("fine_state_dict") is not None:
-        fine = NeuralRadianceField().to(device)
-        fine.load_state_dict(checkpoint["fine_state_dict"])
-        fine.eval()
+    appearance_code = None
+    if appearance is not None:
+        appearance.load_state_dict(appearance_state)
+        # Held-out views were never seen in training, so they get the average appearance
+        appearance_code = appearance.weight.mean(dim=0, keepdim=True)
 
-    sampling = "hierarchical" if fine is not None else "uniform"
-    print(f"Loaded checkpoint from iteration {checkpoint['iteration']} ({sampling} sampling)")
-    return coarse, fine
+    for model in (first, second):
+        if model is not None:
+            model.eval()
+    print(f"Loaded checkpoint from iteration {checkpoint['iteration']} ({settings.type} sampling, "
+          f"spacing={settings.spacing}, {nerf_kwargs.get('architecture', 'book')} model)")
+    return first, second, appearance_code, settings
 
 
 def write_per_view_csv(rows, path):
@@ -197,29 +234,30 @@ def main():
     n_views, height, width, _ = target_images.shape
     print(f"Evaluating on {n_views} test views at {width}x{height}")
 
-    coarse, fine = load_model(device)
+    first, second, appearance_code, settings = load_model(device)
     lpips_metric = LPIPSMetric(device)
 
-    # One ray per pixel. The coarse sample count must match training, and there is no
-    # random jitter at test time (stratified sampling is off by default), so results are deterministic
+    # One ray per pixel. The first-pass sample count and depth range must match training, and there
+    # is no random jitter at test time (training=False), so results are deterministic
     raysampler = NDCMultinomialRaysampler(
         image_height=height,
         image_width=width,
-        n_pts_per_ray=N_COARSE if fine is not None else N_PTS_PER_RAY,
-        min_depth=RAY_MIN_DEPTH,
-        max_depth=RAY_MAX_DEPTH,
+        n_pts_per_ray=settings.n_first,
+        min_depth=settings.min_depth,
+        max_depth=settings.max_depth,
     )
     raymarcher = EmissionAbsorptionRaymarcher()
 
     rows, renders, targets = [], [], []
     for i in tqdm(range(n_views), desc="Rendering test views"):
         ray_bundle = raysampler(cameras=select_cameras(target_cameras, [i]))
-        # Coarse pass, then (if hierarchical) the fine pass; chunked to save memory
-        rendered, _ = render_rays(
-            ray_bundle, coarse, fine, raymarcher, N_FINE, training=False, chunked=True
+        # First pass, then (if hierarchical / proposal) the second pass; chunked to save memory
+        out = render_rays(
+            ray_bundle, first, second, raymarcher, settings, training=False, chunked=True,
+            appearance_codes=appearance_code,
         )
         # Keeps the RGB channels and drops the opacity channel
-        prediction = rendered[0, ..., :3].clamp(0.0, 1.0)
+        prediction = out["rgba"][0, ..., :3].clamp(0.0, 1.0)
         target = target_images[i]
 
         rows.append({
