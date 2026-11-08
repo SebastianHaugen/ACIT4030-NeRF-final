@@ -134,6 +134,7 @@ BATCH_SIZE = int(os.environ.get("NERF_BATCH_SIZE", BATCH_SIZE))
 DISTORTION_WEIGHT = float(os.environ.get("NERF_DIST_WEIGHT", CONFIG["train"]["distortion_weight"]))
 INTERLEVEL_WEIGHT = float(CONFIG["train"]["interlevel_weight"])
 ADAM_EPS = float(os.environ.get("NERF_ADAM_EPS", CONFIG["train"]["adam_eps"]))
+EVAL_APPEARANCE = os.environ.get("NERF_EVAL_APPEARANCE", CONFIG["evaluation"].get("appearance_code", "mean"))
 
 # One output folder per experiment, so runs don't overwrite each other
 EXPERIMENT = os.environ.get("NERF_EXPERIMENT", CONFIG["experiment"])

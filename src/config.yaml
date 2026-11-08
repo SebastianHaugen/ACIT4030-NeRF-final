@@ -89,6 +89,8 @@ evaluation:
   lpips_net: vgg
   figures_dir: outputs/src/figures
   figures_dir_fixed: outputs/src_fixed/figures
+  appearance_code: mean           # code for held-out views: mean (of all training codes) | neighbour
+                                  # (training frames recorded closest in time, poster is a video)
   loss_smoothing_window: 100
 
 smoke_test:

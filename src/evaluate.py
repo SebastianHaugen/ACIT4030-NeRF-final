@@ -5,6 +5,9 @@ Works for uniform, hierarchical and proposal checkpoints. The networks and sampl
 rebuilt from the checkpoint, so evaluation always renders the same way as training did.
 """
 import csv
+import json
+import os
+import re
 import statistics
 
 import matplotlib.pyplot as plt
@@ -35,6 +38,7 @@ from src.repo_util.LoadConfigurations import (
     N_FIGURE_VIEWS,
     EXPERIMENT,
     FIX_DATA,
+    EVAL_APPEARANCE,
 )
 
 IEEE_TEXT_WIDTH_IN = 7.16    # full page width of an IEEE two-column paper in inches
@@ -76,8 +80,8 @@ def load_test_split(device):
 def load_model(device):
     """Loads the networks and the sampler settings of the trained run.
 
-    Returns (first, second, appearance_code, settings), see build_models in train.py.
-    appearance_code is the mean of the training codes (test views have no code of their own), or None.
+    Returns (first, second, appearance_weights, settings), see build_models in train.py.
+    appearance_weights holds one appearance code per training image (n_train, dim), or None.
     """
     checkpoint_path = OUTPUT_DIR / "checkpoint.pt"
     if not checkpoint_path.exists():
@@ -126,18 +130,50 @@ def load_model(device):
     if second is not None:
         second.load_state_dict(checkpoint["fine_state_dict"])
 
-    appearance_code = None
+    appearance_weights = None
     if appearance is not None:
         appearance.load_state_dict(appearance_state)
-        # Held-out views were never seen in training, so they get the average appearance
-        appearance_code = appearance.weight.mean(dim=0, keepdim=True)
+        appearance_weights = appearance.weight
 
     for model in (first, second):
         if model is not None:
             model.eval()
     print(f"Loaded checkpoint from iteration {checkpoint['iteration']} ({settings.type} sampling, "
           f"spacing={settings.spacing}, {nerf_kwargs.get('architecture', 'book')} model)")
-    return first, second, appearance_code, settings
+    return first, second, appearance_weights, settings
+
+
+def test_view_codes(appearance_weights, view_indices):
+    """Appearance code for every test view. Held-out views were never seen in training, so they
+    have no code of their own (NeRF-W, Martin-Brualla et al. 2021):
+
+    mean:      the average of all training codes (the same for every test view)
+    neighbour: the average code of the training frame(s) recorded closest in time. Poster is a
+               video, so these were taken a fraction of a second before / after the test frame,
+               with the same exposure and white balance. Uses training information only.
+    """
+    if EVAL_APPEARANCE == "mean":
+        return appearance_weights.mean(dim=0, keepdim=True).expand(len(view_indices), -1)
+    if EVAL_APPEARANCE != "neighbour":
+        raise ValueError(f"Unknown evaluation.appearance_code '{EVAL_APPEARANCE}', expected mean or neighbour")
+    if not TEST_EVERY:
+        raise ValueError("appearance_code: neighbour needs a dataset split with test_every (a video)")
+
+    # The frames in transforms.json are not stored in recording order, so the time order comes from
+    # the frame number in the file name (frame_00216.png -> 216)
+    with open(os.path.join(DATA_DIR, "transforms.json"), encoding="utf-8") as f:
+        frames = json.load(f)["frames"]
+    numbers = [int(re.findall(r"\d+", os.path.basename(fr["file_path"]))[-1]) for fr in frames]
+    # Same split as train.py: appearance code r belongs to the r-th frame that is not held out
+    train_positions = [i for i in range(len(frames)) if i % TEST_EVERY != 0]
+    train_numbers = torch.tensor([numbers[i] for i in train_positions])
+
+    codes = []
+    for v in view_indices:
+        distance = (train_numbers - numbers[v]).abs()
+        closest = (distance == distance.min()).nonzero().flatten().to(appearance_weights.device)
+        codes.append(appearance_weights[closest].mean(dim=0))
+    return torch.stack(codes)
 
 
 def write_per_view_csv(rows, path):
@@ -225,7 +261,10 @@ def save_qualitative_figure(targets, renders, rows, positions, path):
 def main():
     """Renders every test view, computes the metrics and saves the results and the figure."""
     device = torch.device("cuda:0") if torch.cuda.is_available() else torch.device("cpu")
-    render_dir = OUTPUT_DIR / "test_renders"
+    # Results with the default (mean) appearance code keep the normal file names, other modes
+    # get a suffix, so both can be reported side by side
+    suffix = "" if EVAL_APPEARANCE == "mean" else f"_{EVAL_APPEARANCE}"
+    render_dir = OUTPUT_DIR / f"test_renders{suffix}"
     render_dir.mkdir(parents=True, exist_ok=True)
     FIGURES_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -234,8 +273,12 @@ def main():
     n_views, height, width, _ = target_images.shape
     print(f"Evaluating on {n_views} test views at {width}x{height}")
 
-    first, second, appearance_code, settings = load_model(device)
+    first, second, appearance_weights, settings = load_model(device)
     lpips_metric = LPIPSMetric(device)
+    codes = None
+    if appearance_weights is not None:
+        codes = test_view_codes(appearance_weights, view_indices)
+        print(f"Appearance code for the test views: {EVAL_APPEARANCE}")
 
     # One ray per pixel. The first-pass sample count and depth range must match training, and there
     # is no random jitter at test time (training=False), so results are deterministic
@@ -254,7 +297,7 @@ def main():
         # First pass, then (if hierarchical / proposal) the second pass; chunked to save memory
         out = render_rays(
             ray_bundle, first, second, raymarcher, settings, training=False, chunked=True,
-            appearance_codes=appearance_code,
+            appearance_codes=codes[i:i + 1] if codes is not None else None,
         )
         # Keeps the RGB channels and drops the opacity channel
         prediction = out["rgba"][0, ..., :3].clamp(0.0, 1.0)
@@ -270,10 +313,10 @@ def main():
         targets.append(target.cpu())
         plt.imsave(render_dir / f"view_{view_indices[i]:03d}.png", prediction.cpu().numpy())
 
-    write_per_view_csv(rows, OUTPUT_DIR / "metrics_per_view.csv")
-    summary = write_summary_csv(rows, OUTPUT_DIR / "metrics.csv")
+    write_per_view_csv(rows, OUTPUT_DIR / f"metrics_per_view{suffix}.csv")
+    summary = write_summary_csv(rows, OUTPUT_DIR / f"metrics{suffix}.csv")
 
-    figure_path = FIGURES_DIR / f"qualitative_{ACTIVE_DATASET}_{EXPERIMENT}.png"
+    figure_path = FIGURES_DIR / f"qualitative_{ACTIVE_DATASET}_{EXPERIMENT}{suffix}.png"
     save_qualitative_figure(targets, renders, rows, pick_figure_views(rows, N_FIGURE_VIEWS), figure_path)
 
     print(
