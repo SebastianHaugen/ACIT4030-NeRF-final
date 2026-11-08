@@ -18,7 +18,7 @@ datasets:
     n_figure_views: 4
   poster:
     data_dir: data/poster
-    output_dir: outputs/src/poster
+    output_dir: outputs/baseline/poster
     n_iter: 30000
     resize_to: [480, 270]         
     znear: 0.01

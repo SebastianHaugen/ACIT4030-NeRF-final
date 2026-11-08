@@ -87,7 +87,7 @@ def _env_bool(name, default):
 
 
 # Sampling settings (src/model.py, src/sampling.py, src/render.py, src/train.py)
-# Every setting can be overridden with an environment variable, so run_lego.ps1 can queue
+# Every setting can be overridden with an environment variable, so run_final.sh can queue
 # several experiments without editing config.yaml. Not set = value from config.yaml
 SAMPLER = os.environ.get("NERF_SAMPLER", CONFIG["sampler"]["type"])                         # uniform | hierarchical | proposal
 STRATIFIED = _env_bool("NERF_STRATIFIED", CONFIG["sampler"]["stratified"])

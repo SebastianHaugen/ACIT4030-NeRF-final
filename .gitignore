@@ -226,9 +226,14 @@ data/*
 #But keep this file so Git can track the 'data' folder
 !data/.gitkeep
 # Ignore outputs, but keep the small result files so the numbers are versioned
-outputs/**
-!outputs/**/
-!outputs/.gitkeep
-!outputs/**/metrics*.csv
-!outputs/**/loss_history.csv
-!outputs/**/config_used.yaml
+#outputs/**
+#!outputs/**/
+#!outputs/.gitkeep
+#!outputs/**/metrics*.csv
+#!outputs/**/loss_history.csv
+#!outputs/**/config_used.yaml
+# Training previews (one image per preview iteration), not needed in the repo
+outputs/**/previews/
+outputs/**/checkpoint.pt
+# Short pipeline checks before the full runs, not results
+outputs/**/smoke_test/
