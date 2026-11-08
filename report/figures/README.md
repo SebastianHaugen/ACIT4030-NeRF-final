@@ -1,7 +1,9 @@
 # Report figures
 
-This folder holds the figures and tables for the report. They are written by `src/evaluate.py` and `src/report_figures.py`.
+Figures and tables used in the report.
 
-The files are not committed. They are created on the Colab machine during training, and we never commit or push from Colab. Instead, cell 17 of the Colab notebook copies them to Google Drive.
-
-This README keeps the folder in the repository, since Git does not store empty folders.
+- `lego/`, `poster/`: figures from the earlier ablations on the uncorrected data (A2 baseline and sampling runs).
+- The final figures and tables (corrected data) are generated in `outputs/src_fixed/figures/`:
+  `src/evaluate.py` writes the qualitative figures (`qualitative_<dataset>_<run>[_neighbour].png`), and
+  `src/report_figures.py` writes the ablation tables (`table_ablation_<dataset>.tex`) and loss plots (`loss_<dataset>.pdf`).
+  Copy the ones used in the report into this folder.
