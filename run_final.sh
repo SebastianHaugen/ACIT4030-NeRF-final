@@ -86,6 +86,11 @@ run_src poster "enc_mlp_dist_prop"            "$PROP"
 run_src poster "enc_mlp_dist_prop_contract_app"           "$PROP $UNBOUNDED"
 run_src poster "enc_mlp_dist_prop_contract_app_exp_4096"  "$PROP $UNBOUNDED $BUDGET"
 
+# Lego is the dynamic D-NeRF scene (the bucket moves), so the best lego models are retrained with
+# the frame time as an extra input (T-NeRF)
+run_src lego   "hashgrid_time"                   "$HASH NERF_TIME=true"
+run_src lego   "enc_mlp_dist_prop_exp_4096_time" "$PROP $BUDGET NERF_TIME=true"
+
 if [[ "$MODE" != "--smoke" ]]; then
     NERF_FIX_DATA=true "$PYTHON" -m src.report_figures > logs/final_report.log 2>&1
     cat logs/final_report.log

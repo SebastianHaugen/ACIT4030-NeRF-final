@@ -65,6 +65,11 @@ Run-Src "poster" "enc_mlp_dist_prop"           $prop
 Run-Src "poster" "enc_mlp_dist_prop_contract_app"           (Merge $prop $unbounded)
 Run-Src "poster" "enc_mlp_dist_prop_contract_app_exp_4096"  (Merge (Merge $prop $unbounded) $budget)
 
+# Lego is the dynamic D-NeRF scene (the bucket moves), so the best lego models are retrained with
+# the frame time as an extra input (T-NeRF)
+Run-Src "lego"   "hashgrid_time"                    (Merge $hash @{ NERF_TIME = "true" })
+Run-Src "lego"   "enc_mlp_dist_prop_exp_4096_time"  (Merge (Merge $prop $budget) @{ NERF_TIME = "true" })
+
 Clear-Overrides
 $env:NERF_FIX_DATA = "true"
 python -m src.report_figures *> logs\final_report.log

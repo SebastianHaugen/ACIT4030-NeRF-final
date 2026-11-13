@@ -128,6 +128,8 @@ def read_extras(cfg):
         extras.append("dist.")
     if int(model.get("appearance_dim", 0)) > 0:
         extras.append("app.")
+    if model.get("time_input", False):
+        extras.append("time input")
     if train.get("lr_schedule", "step") == "exp":
         extras.append("exp. LR")
     n_rays = int(train.get("batch_size", 4)) * int(render.get("n_rays_per_image", 400))
@@ -196,7 +198,7 @@ def write_ablation_table(dataset, runs):
 Points: samples per ray (hierarchical: coarse + fine, proposal: proposal $\to$ NeRF).
 $\delta$: opacity uses the sample spacing (NeRF eq.~3). Strat.: stratified sampling during training.
 Other: 8-layer NeRF MLP or hash grid (Instant-NGP), positional encoding frequencies (position/direction), sample spacing,
-scene contraction, distortion loss, appearance embeddings, exponential learning-rate decay and
+scene contraction, distortion loss, appearance embeddings, frame time as input (T-NeRF), exponential learning-rate decay and
 rays per training step if not 1600 (-- = book model).
 Time: wall-clock training time in minutes (-- if not logged).}}
 \label{{tab:ablation_{dataset}}}

@@ -123,6 +123,8 @@ N_HARMONIC_FUNCTIONS_DIR = int(os.environ.get("NERF_N_HARM_DIR", CONFIG["model"]
 HARMONIC_OMEGA0 = float(os.environ.get("NERF_OMEGA0", HARMONIC_OMEGA0))
 INCLUDE_INPUT = _env_bool("NERF_INCLUDE_INPUT", CONFIG["model"]["include_input"])
 APPEARANCE_DIM = int(os.environ.get("NERF_APPEARANCE_DIM", CONFIG["model"]["appearance_dim"]))
+TIME_INPUT = _env_bool("NERF_TIME", CONFIG["model"].get("time_input", False))
+N_HARMONIC_FUNCTIONS_TIME = int(CONFIG["model"].get("n_harmonic_functions_time", 6))
 
 # Training additions
 LEARNING_RATE = float(os.environ.get("NERF_LR", LEARNING_RATE))
@@ -161,6 +163,7 @@ CONFIG["model"].update({
     "omega0": HARMONIC_OMEGA0,
     "include_input": INCLUDE_INPUT,
     "appearance_dim": APPEARANCE_DIM,
+    "time_input": TIME_INPUT,
 })
 CONFIG["train"].update({
     "learning_rate": LEARNING_RATE,
