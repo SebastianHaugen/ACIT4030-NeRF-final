@@ -18,7 +18,7 @@ from pytorch3d.renderer import (
     EmissionAbsorptionRaymarcher,
 )
 
-from src.load_nerf_data import load_nerf_data
+from src.load_nerf_data import load_nerf_data, load_frame_times
 from src.metrics import psnr, ssim, LPIPSMetric
 from src.render import render_rays, SamplerSettings
 from src.train import select_cameras, fix_fov_for_aspect, build_models
@@ -279,6 +279,13 @@ def main():
     if appearance_weights is not None:
         codes = test_view_codes(appearance_weights, view_indices)
         print(f"Appearance code for the test views: {EVAL_APPEARANCE}")
+    # Time-conditioned models (dynamic lego) render every test view at the time of its own frame,
+    # the standard D-NeRF evaluation
+    test_times = None
+    if getattr(second if second is not None else first, "time_input", False):
+        all_times = load_frame_times(str(DATA_DIR), split="train" if TEST_EVERY else "test")
+        test_times = all_times[view_indices].to(device)
+        print("Rendering each test view at its own frame time")
 
     # One ray per pixel. The first-pass sample count and depth range must match training, and there
     # is no random jitter at test time (training=False), so results are deterministic
@@ -298,6 +305,7 @@ def main():
         out = render_rays(
             ray_bundle, first, second, raymarcher, settings, training=False, chunked=True,
             appearance_codes=codes[i:i + 1] if codes is not None else None,
+            times=test_times[i:i + 1] if test_times is not None else None,
         )
         # Keeps the RGB channels and drops the opacity channel
         prediction = out["rgba"][0, ..., :3].clamp(0.0, 1.0)

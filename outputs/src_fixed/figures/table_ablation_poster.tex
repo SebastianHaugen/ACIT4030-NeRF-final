@@ -6,7 +6,7 @@
 Points: samples per ray (hierarchical: coarse + fine, proposal: proposal $\to$ NeRF).
 $\delta$: opacity uses the sample spacing (NeRF eq.~3). Strat.: stratified sampling during training.
 Other: 8-layer NeRF MLP or hash grid (Instant-NGP), positional encoding frequencies (position/direction), sample spacing,
-scene contraction, distortion loss, appearance embeddings, exponential learning-rate decay and
+scene contraction, distortion loss, appearance embeddings, frame time as input (T-NeRF), exponential learning-rate decay and
 rays per training step if not 1600 (-- = book model).
 Time: wall-clock training time in minutes (-- if not logged).}
 \label{tab:ablation_poster}

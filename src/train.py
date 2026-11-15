@@ -31,7 +31,7 @@ from pytorch3d.renderer import (
     EmissionAbsorptionRaymarcher,
 )
 
-from src.load_nerf_data import load_nerf_data
+from src.load_nerf_data import load_nerf_data, load_frame_times
 from src.model import NeuralRadianceField, ProposalField
 from src.render import render_rays, SamplerSettings, SAMPLERS
 from src.sampling import interlevel_loss, distortion_loss, lengths_to_edges, t_to_s, SPACINGS
@@ -86,6 +86,8 @@ from src.repo_util.LoadConfigurations import (
     SCENE_BOUND,
     HASHGRID,
     ADAM_EPS,
+    TIME_INPUT,
+    N_HARMONIC_FUNCTIONS_TIME,
 )
 
 PREVIEW_VIEW = 0  # the same training view in every preview, so they can be compared over time
@@ -132,6 +134,8 @@ NERF_KWARGS = dict(
     contraction_radius=CONTRACTION_RADIUS,
     scene_bound=SCENE_BOUND,
     hashgrid=HASHGRID,
+    time_input=TIME_INPUT,
+    n_harmonic_functions_time=N_HARMONIC_FUNCTIONS_TIME,
 )
 PROPOSAL_KWARGS = dict(
     n_harmonic_functions=N_HARMONIC_FUNCTIONS,
@@ -242,6 +246,19 @@ def load_train_split(device):
     return images, silhouettes, cameras
 
 
+def load_train_times(device):
+    """Frame times (n_train,) of the training images for time_input models, else None."""
+    if not TIME_INPUT:
+        return None
+    times = load_frame_times(str(DATA_DIR), split="train")
+    if times is None:
+        raise ValueError(f"model.time_input is on, but the {ACTIVE_DATASET} frames have no 'time' field")
+    if TEST_EVERY:  # the same images as load_train_split keeps
+        all_idx = torch.arange(len(times))
+        times = times[all_idx % TEST_EVERY != 0]
+    return times.to(device)
+
+
 def make_train_raysampler(x_extent, y_extent):
     """Random rays for each training step, optionally with stratified (jittered) sample depths."""
     kwargs = dict(
@@ -327,7 +344,7 @@ def build_models(settings, nerf_kwargs, proposal_kwargs, n_images, device):
 
 
 def save_preview(first, second, appearance, raysampler_grid, raymarcher, camera, target_image,
-                 hist_color, hist_sil, iteration, path):
+                 hist_color, hist_sil, iteration, path, train_times=None):
     """Saves a full render of one training view next to the ground truth and the loss curves."""
     with torch.no_grad():
         ray_bundle = raysampler_grid(cameras=camera)
@@ -337,6 +354,7 @@ def save_preview(first, second, appearance, raysampler_grid, raymarcher, camera,
         out = render_rays(
             ray_bundle, first, second, raymarcher, SAMPLER_SETTINGS, training=False, chunked=True,
             appearance_codes=codes,
+            times=train_times[PREVIEW_VIEW:PREVIEW_VIEW + 1] if train_times is not None else None,
         )
     rendered, rendered_coarse = out["rgba"], out["rgba_coarse"]
     rendered_image = rendered[0, ..., :3].clamp(0.0, 1.0)
@@ -444,8 +462,10 @@ def main(
     print(f"Model: {ARCHITECTURE}, L={N_HARMONIC_FUNCTIONS}/{N_HARMONIC_FUNCTIONS_DIR}, omega0={HARMONIC_OMEGA0}, "
           f"include_input={INCLUDE_INPUT}, appearance_dim={APPEARANCE_DIM}, lr={LEARNING_RATE} ({LR_SCHEDULE}"
           + (f" -> {LR_FINAL}, warm-up {LR_WARMUP}" if LR_SCHEDULE == "exp" else "")
-          + f"), distortion_weight={DISTORTION_WEIGHT}, rays per step={BATCH_SIZE}x{N_RAYS_PER_IMAGE}")
+          + f"), distortion_weight={DISTORTION_WEIGHT}, rays per step={BATCH_SIZE}x{N_RAYS_PER_IMAGE}"
+          + (f", time input (L={N_HARMONIC_FUNCTIONS_TIME})" if TIME_INPUT else ""))
     target_images, target_silhouettes, target_cameras = load_train_split(device)
+    train_times = load_train_times(device)
     n_images, height, width, _ = target_images.shape
     x_extent, y_extent = ndc_extent_for(height, width)
     print(f"{n_images} training images at {width}x{height}, {n_iter} iterations on {device}")
@@ -492,11 +512,14 @@ def main(
         batch_cameras = select_cameras(target_cameras, batch_idx)
         # The appearance code of each image in the batch (NeRF-W)
         codes = appearance(batch_idx.to(device)) if appearance is not None else None
+        # The time of each image in the batch (dynamic scenes, T-NeRF)
+        batch_times = train_times[batch_idx.to(device)] if train_times is not None else None
 
         # Random rays, then the first pass (and the second pass for hierarchical / proposal)
         ray_bundle = raysampler_mc(cameras=batch_cameras)
         out = render_rays(
-            ray_bundle, first, second, raymarcher, SAMPLER_SETTINGS, training=True, appearance_codes=codes
+            ray_bundle, first, second, raymarcher, SAMPLER_SETTINGS, training=True, appearance_codes=codes,
+            times=batch_times,
         )
 
         # Loss on the final render (the fine / NeRF render for the two-pass samplers)
@@ -553,6 +576,7 @@ def main(
                 loss_history_sil,
                 iteration,
                 preview_dir / f"iter_{iteration:05d}.png",
+                train_times,
             )
 
         if iteration > 0 and iteration % checkpoint_every == 0:

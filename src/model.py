@@ -187,10 +187,11 @@ def density_to_alpha(raw_densities, lengths, directions, uses_delta):
 MAX_POINTS_PER_CHUNK = 2 ** 18  # sample points per forward pass when rendering a full image
 
 
-def chunked_forward(forward, ray_bundle, n_batches, per_ray=None):
-    """Runs forward(bundle, per_ray_chunk) on chunks of rays, so a full image fits in memory.
+def chunked_forward(forward, ray_bundle, n_batches, **per_ray):
+    """Runs forward(bundle, **per_ray_chunks) on chunks of rays, so a full image fits in memory.
 
-    per_ray: optional tensor (..., D) with one value per ray (e.g. appearance codes)
+    per_ray: optional tensors (..., D) with one value per ray (e.g. appearance codes, times);
+             None values are passed on as None
     Returns the outputs of forward joined again, each with shape (..., P, channels).
     """
     n_pts_per_ray = ray_bundle.lengths.shape[-1]
@@ -206,8 +207,8 @@ def chunked_forward(forward, ray_bundle, n_batches, per_ray=None):
     origins = ray_bundle.origins.reshape(-1, 3)
     directions = ray_bundle.directions.reshape(-1, 3)
     lengths = ray_bundle.lengths.reshape(-1, n_pts_per_ray)
-    if per_ray is not None:
-        per_ray = per_ray.reshape(tot_samples, -1)
+    per_ray = {name: (value.reshape(tot_samples, -1) if value is not None else None)
+               for name, value in per_ray.items()}
 
     # Runs the normal forward pass on one chunk at a time
     batch_outputs = [
@@ -218,7 +219,7 @@ def chunked_forward(forward, ray_bundle, n_batches, per_ray=None):
                 lengths=lengths[batch_idx],
                 xys=None,
             ),
-            per_ray[batch_idx] if per_ray is not None else None,
+            **{name: (value[batch_idx] if value is not None else None) for name, value in per_ray.items()},
         ) for batch_idx in batches
     ]
 
@@ -246,8 +247,16 @@ class NeuralRadianceField(torch.nn.Module):
         contraction_radius=CONTRACTION_RADIUS,
         scene_bound=SCENE_BOUND,
         hashgrid=None,
+        time_input=False,
+        n_harmonic_functions_time=6,
     ):
-        """Builds the MLP that predicts opacity and colour for each sample point."""
+        """Builds the MLP that predicts opacity and colour for each sample point.
+
+        time_input: the field also gets the time of the frame (T-NeRF, the time-conditioned baseline
+        of D-NeRF, Pumarola et al. 2021), for dynamic scenes such as the D-NeRF lego, where the
+        bucket moves. The encoded time is fed in next to the encoded position, so density and
+        colour can change over time.
+        """
         super().__init__()
         if architecture not in ("book", "nerf", "hashgrid"):
             raise ValueError(f"Unknown architecture '{architecture}', expected 'book', 'nerf' or 'hashgrid'")
@@ -272,6 +281,16 @@ class NeuralRadianceField(torch.nn.Module):
         embedding_dim = self.harmonic_embedding.output_dim()
         # The colour head also gets the embedded direction and the appearance code
         color_extra_dim = self.harmonic_embedding_dir.output_dim() + appearance_dim
+
+        # Time t in [0, 1]: sin/cos at pi * 1, 2, 4, ... plus t itself. Added to the position input
+        self.time_input = time_input
+        time_dim = 0
+        if time_input:
+            self.harmonic_embedding_time = HarmonicEmbedding(
+                n_harmonic_functions_time, math.pi, include_input=True, persistent=False
+            )
+            time_dim = self.harmonic_embedding_time.output_dim(input_dim=1)
+        embedding_dim += time_dim  # book / nerf: the time is part of the MLP input (and the skip)
 
         if architecture == "book":
             # Shared part with two hidden layers, Softplus is used instead of ReLU
@@ -298,7 +317,7 @@ class NeuralRadianceField(torch.nn.Module):
                                          hg["base_res"], hg["max_res"])
             n_geo = 15
             self.mlp = torch.nn.Sequential(
-                torch.nn.Linear(self.encoding.output_dim(), hg["hidden"]),
+                torch.nn.Linear(self.encoding.output_dim() + time_dim, hg["hidden"]),
                 torch.nn.ReLU(),
                 torch.nn.Linear(hg["hidden"], 1 + n_geo),
             )
@@ -396,19 +415,32 @@ class NeuralRadianceField(torch.nn.Module):
         self,
         ray_bundle: RayBundle,
         appearance_codes=None,
+        times=None,
         **kwargs,
     ):
         """Returns the opacity and RGB colour of every sample point along the rays.
 
         appearance_codes: optional (..., appearance_dim), one code per ray
+        times:            (..., 1) time of the frame each ray belongs to (only with time_input)
         """
         rays_points_world = self._ray_points(ray_bundle)
         # rays_points_world.shape = [minibatch x ... x 3]
 
+        # Encoded time, repeated for every point on the ray
+        time_features = None
+        if self.time_input:
+            if times is None:
+                raise ValueError("This model was trained with time_input, so it needs the frame times")
+            time_features = self.harmonic_embedding_time(times)
+            time_features = time_features[..., None, :].expand(*rays_points_world.shape[:-1], -1)
+
         if self.architecture == "hashgrid":
             x, inside = normalize_points(rays_points_world, self.contract, self.contraction_center,
                                          self.contraction_radius, self.scene_bound)
-            h = self.mlp(self.encoding(x))
+            features = self.encoding(x)
+            if time_features is not None:
+                features = torch.cat((features, time_features), dim=-1)
+            h = self.mlp(features)
             # Density per unit length, exp activation as in Instant-NGP / nerfacto
             raw_densities = trunc_exp(h[..., :1] - 1.0) * inside
             color_features = h[..., 1:]
@@ -416,6 +448,8 @@ class NeuralRadianceField(torch.nn.Module):
             embeds = self.harmonic_embedding(
                 rays_points_world
             )
+            if time_features is not None:
+                embeds = torch.cat((embeds, time_features), dim=-1)
             # embeds.shape = [minibatch x ... x embedding_dim]
 
             density_features, color_features = self._trunk(embeds)
@@ -436,13 +470,13 @@ class NeuralRadianceField(torch.nn.Module):
         self,
         ray_bundle: RayBundle,
         appearance_codes=None,
+        times=None,
         n_batches: int = N_BATCHES_FULL_RENDER,
         **kwargs,
     ):
         """Runs forward in chunks so a full image can be rendered without running out of memory."""
         rays_densities, rays_colors = chunked_forward(
-            lambda bundle, codes: self.forward(bundle, appearance_codes=codes),
-            ray_bundle, n_batches, appearance_codes,
+            self.forward, ray_bundle, n_batches, appearance_codes=appearance_codes, times=times,
         )
         return rays_densities, rays_colors
 
@@ -518,4 +552,4 @@ class ProposalField(torch.nn.Module):
 
     def batched_forward(self, ray_bundle: RayBundle, n_batches: int = N_BATCHES_FULL_RENDER, **kwargs):
         """Runs forward in chunks so a full image can be rendered without running out of memory."""
-        return chunked_forward(lambda bundle, _: (self.forward(bundle),), ray_bundle, n_batches)[0]
+        return chunked_forward(lambda bundle, **_: (self.forward(bundle),), ray_bundle, n_batches)[0]

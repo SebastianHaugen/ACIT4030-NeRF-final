@@ -31,7 +31,7 @@ class SamplerSettings:
 
 
 def render_rays(ray_bundle, first, second, raymarcher, settings, training, chunked=False,
-                appearance_codes=None):
+                appearance_codes=None, times=None):
     """Renders a ray bundle.
 
     ray_bundle: PyTorch3D RayBundle from a raysampler (linearly spaced lengths)
@@ -42,6 +42,9 @@ def render_rays(ray_bundle, first, second, raymarcher, settings, training, chunk
     training:   True = random samples (if stratified), False = deterministic (evaluation, previews)
     chunked:    True = use batched_forward to save memory (full-image rendering)
     appearance_codes: optional (B, appearance_dim), one code per camera in the batch
+    times:      optional (B,), the time of each camera's frame (dynamic scenes, time_input models).
+                Only the NeRF models get it; the proposal network stays static and learns where
+                the scene can be at any time, which is enough to place the samples
 
     Returns a dict:
         rgba:             (..., 4) final render, RGB plus opacity (silhouette)
@@ -58,16 +61,19 @@ def render_rays(ray_bundle, first, second, raymarcher, settings, training, chunk
         )
         ray_bundle = ray_bundle._replace(lengths=lengths)
 
-    # One appearance code per camera, repeated for every ray of that camera
+    # One appearance code and one time per camera, repeated for every ray of that camera
+    ray_shape = ray_bundle.origins.shape[:-1]
     if appearance_codes is not None:
-        ray_shape = ray_bundle.origins.shape[:-1]
         view_shape = (appearance_codes.shape[0],) + (1,) * (len(ray_shape) - 1) + (-1,)
         appearance_codes = appearance_codes.view(view_shape).expand(*ray_shape, -1)
+    if times is not None:
+        view_shape = (times.shape[0],) + (1,) * (len(ray_shape) - 1) + (1,)
+        times = times.reshape(view_shape).expand(*ray_shape, 1)
 
     def run(model, bundle):
         if chunked:
-            return model.batched_forward(bundle, appearance_codes=appearance_codes)
-        return model(bundle, appearance_codes=appearance_codes)
+            return model.batched_forward(bundle, appearance_codes=appearance_codes, times=times)
+        return model(bundle, appearance_codes=appearance_codes, times=times)
 
     out = {"rgba_coarse": None, "proposal_weights": None, "proposal_lengths": None}
 

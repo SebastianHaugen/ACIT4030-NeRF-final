@@ -34,6 +34,21 @@ def undistortion_grid(fx, fy, cx, cy, k1, k2, p1, p2, width, height, device):
     return grid[None]  # (1, H, W, 2)
 
 
+def load_frame_times(data_dir, split="train"):
+    """Time of every frame (0 to 1) for dynamic D-NeRF scenes, in the same order as load_nerf_data.
+
+    Returns a tensor (N,), or None if the frames have no 'time' field (static scenes).
+    """
+    path = os.path.join(data_dir, f"transforms_{split}.json")
+    if not os.path.exists(path):
+        path = os.path.join(data_dir, "transforms.json")
+    with open(path, 'r') as f:
+        frames = json.load(f)['frames']
+    if not all('time' in frame for frame in frames):
+        return None
+    return torch.tensor([float(frame['time']) for frame in frames])
+
+
 def load_nerf_data(data_dir, split="train", device="cpu", znear=0.01, zfar=10.0, resize_to=None,
                    premultiply_alpha=False, undistort=False):
     """

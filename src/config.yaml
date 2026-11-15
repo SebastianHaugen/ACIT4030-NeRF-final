@@ -62,6 +62,8 @@ model:
     max_res: 2048                 # finest grid, cells per side
     hidden: 64                    # width of the tiny density and colour MLPs
   appearance_dim: 0               # > 0: per-image appearance embedding (NeRF-W), 0 = off
+  time_input: false               # true: the frame time is a model input (T-NeRF), for the dynamic D-NeRF lego
+  n_harmonic_functions_time: 6    # frequencies for the time encoding
 
 render:
   n_rays_per_image: 400
