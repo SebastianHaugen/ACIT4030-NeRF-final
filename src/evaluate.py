@@ -77,13 +77,14 @@ def load_test_split(device):
     return images, cameras, test_idx.tolist()
 
 
-def load_model(device):
+def load_model(device, checkpoint_path=None):
     """Loads the networks and the sampler settings of the trained run.
 
+    checkpoint_path: defaults to the checkpoint of the active experiment (OUTPUT_DIR)
     Returns (first, second, appearance_weights, settings), see build_models in train.py.
     appearance_weights holds one appearance code per training image (n_train, dim), or None.
     """
-    checkpoint_path = OUTPUT_DIR / "checkpoint.pt"
+    checkpoint_path = checkpoint_path or OUTPUT_DIR / "checkpoint.pt"
     if not checkpoint_path.exists():
         raise FileNotFoundError(f"No checkpoint at {checkpoint_path}. Train first: python -m src.train")
     checkpoint = torch.load(checkpoint_path, map_location=device)

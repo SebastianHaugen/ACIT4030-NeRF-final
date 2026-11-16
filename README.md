@@ -23,6 +23,7 @@ Single experiment (settings from `src/config.yaml`, any of them can be overridde
     NERF_DATASET=poster NERF_EXPERIMENT=my_run python -m src.train
     NERF_DATASET=poster NERF_EXPERIMENT=my_run python -m src.evaluate
     python -m src.report_figures                                           # tables + loss plots
+    NERF_DATASET=lego python -m src.render_video                           # 360° orbit GIFs + filmstrip figure
 
 Full final ablation (skips runs that are already finished):
 
