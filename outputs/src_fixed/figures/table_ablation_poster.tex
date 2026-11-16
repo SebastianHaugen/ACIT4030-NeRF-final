@@ -14,13 +14,18 @@ Time: wall-clock training time in minutes (-- if not logged).}
 \toprule
 Run & Sampler & Points & $\delta$ & Strat. & Other & PSNR $\uparrow$ (dB) & SSIM $\uparrow$ & LPIPS $\downarrow$ & Time (min) \\
 \midrule
+enc\_10\_4 & uniform & 128 & \checkmark & \checkmark & L=10/4 & $23.62 \pm 1.50$ & $0.757 \pm 0.036$ & $0.529 \pm 0.029$ & 19.3 \\
 enc\_mlp & uniform & 128 & \checkmark & \checkmark & 8-layer MLP, L=10/4 & $\mathbf{26.15 \pm 1.54}$ & $0.823 \pm 0.033$ & $0.417 \pm 0.033$ & 53.2 \\
+enc\_mlp\_dist & uniform & 128 & \checkmark & \checkmark & 8-layer MLP, L=10/4, dist. & $25.97 \pm 1.50$ & $0.816 \pm 0.033$ & $0.440 \pm 0.028$ & 54.1 \\
 enc\_mlp\_dist\_prop & proposal & 128$\to$64 & \checkmark & \checkmark & 8-layer MLP, L=10/4, dist. & $21.71 \pm 2.05$ & $0.724 \pm 0.036$ & $0.586 \pm 0.053$ & 32.2 \\
 enc\_mlp\_dist\_prop\_contract\_app & proposal & 128$\to$64 & \checkmark & \checkmark & 8-layer MLP, L=10/4, lindisp, contract, dist., app. & $25.97 \pm 1.46$ & $0.848 \pm 0.030$ & $0.373 \pm 0.031$ & 32.7 \\
 enc\_mlp\_dist\_prop\_contract\_app\_exp\_4096 & proposal & 128$\to$64 & \checkmark & \checkmark & 8-layer MLP, L=10/4, lindisp, contract, dist., app., exp. LR, 4096 rays & $26.03 \pm 1.45$ & $0.838 \pm 0.031$ & $0.394 \pm 0.029$ & 79.9 \\
 hashgrid & proposal & 128$\to$64 & \checkmark & \checkmark & hash grid, lindisp, contract, dist., app., exp. LR, 4096 rays & $24.38 \pm 3.52$ & $\mathbf{0.896 \pm 0.040}$ & $\mathbf{0.217 \pm 0.054}$ & 84.4 \\
+hier\_64\_128 & hierarchical & 64+128 & \checkmark & \checkmark & -- & $25.88 \pm 1.41$ & $0.796 \pm 0.034$ & $0.465 \pm 0.021$ & 56.7 \\
 uniform & uniform & 128 & -- & -- & -- & $19.85 \pm 1.97$ & $0.625 \pm 0.051$ & $0.626 \pm 0.038$ & 28.5 \\
 uniform\_delta & uniform & 128 & \checkmark & -- & -- & $24.57 \pm 1.28$ & $0.766 \pm 0.034$ & $0.508 \pm 0.018$ & 27.8 \\
+uniform\_delta\_strat & uniform & 128 & \checkmark & \checkmark & -- & $24.49 \pm 1.34$ & $0.768 \pm 0.035$ & $0.511 \pm 0.019$ & 27.9 \\
+uniform\_delta\_strat\_192 & uniform & 192 & \checkmark & \checkmark & -- & $24.67 \pm 1.29$ & $0.773 \pm 0.034$ & $0.502 \pm 0.018$ & 41.3 \\
 \bottomrule
 \end{tabular}
 \end{table*}

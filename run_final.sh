@@ -91,6 +91,17 @@ run_src poster "enc_mlp_dist_prop_contract_app_exp_4096"  "$PROP $UNBOUNDED $BUD
 run_src lego   "hashgrid_time"                   "$HASH NERF_TIME=true"
 run_src lego   "enc_mlp_dist_prop_exp_4096_time" "$PROP $BUDGET NERF_TIME=true"
 
+# The rest of the earlier ablations (first run on the uncorrected data, partly on another PC),
+# repeated here so every row is on the corrected data and the same GPU:
+# stratified sampling, more samples, NeRF hierarchical sampling, encoding only, distortion loss only
+for dataset in lego poster; do
+    run_src $dataset "uniform_delta_strat"     "NERF_DELTA=true NERF_STRATIFIED=true"
+    run_src $dataset "uniform_delta_strat_192" "NERF_DELTA=true NERF_STRATIFIED=true NERF_N_PTS=192"
+    run_src $dataset "hier_64_128"             "NERF_DELTA=true NERF_STRATIFIED=true NERF_SAMPLER=hierarchical NERF_N_COARSE=64 NERF_N_FINE=128 NERF_GRAD_ACCUM=2"
+    run_src $dataset "enc_10_4"                "NERF_DELTA=true NERF_STRATIFIED=true NERF_N_HARM=10 NERF_N_HARM_DIR=4 NERF_OMEGA0=3.14159265 NERF_INCLUDE_INPUT=true"
+    run_src $dataset "enc_mlp_dist"            "$MLP NERF_DIST_WEIGHT=0.01"
+done
+
 if [[ "$MODE" != "--smoke" ]]; then
     NERF_FIX_DATA=true "$PYTHON" -m src.report_figures > logs/final_report.log 2>&1
     cat logs/final_report.log

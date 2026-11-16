@@ -133,6 +133,7 @@ LR_FINAL = float(os.environ.get("NERF_LR_FINAL", CONFIG["train"]["lr_final"]))
 LR_WARMUP = int(os.environ.get("NERF_LR_WARMUP", CONFIG["train"]["lr_warmup"]))
 N_RAYS_PER_IMAGE = int(os.environ.get("NERF_N_RAYS", N_RAYS_PER_IMAGE))
 BATCH_SIZE = int(os.environ.get("NERF_BATCH_SIZE", BATCH_SIZE))
+GRAD_ACCUM = int(os.environ.get("NERF_GRAD_ACCUM", CONFIG["train"].get("grad_accum", 1)))
 DISTORTION_WEIGHT = float(os.environ.get("NERF_DIST_WEIGHT", CONFIG["train"]["distortion_weight"]))
 INTERLEVEL_WEIGHT = float(CONFIG["train"]["interlevel_weight"])
 ADAM_EPS = float(os.environ.get("NERF_ADAM_EPS", CONFIG["train"]["adam_eps"]))
@@ -171,6 +172,7 @@ CONFIG["train"].update({
     "lr_final": LR_FINAL,
     "lr_warmup": LR_WARMUP,
     "batch_size": BATCH_SIZE,
+    "grad_accum": GRAD_ACCUM,
     "adam_eps": ADAM_EPS,
     "distortion_weight": DISTORTION_WEIGHT,
 })

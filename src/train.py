@@ -88,6 +88,7 @@ from src.repo_util.LoadConfigurations import (
     ADAM_EPS,
     TIME_INPUT,
     N_HARMONIC_FUNCTIONS_TIME,
+    GRAD_ACCUM,
 )
 
 PREVIEW_VIEW = 0  # the same training view in every preview, so they can be compared over time
@@ -509,53 +510,70 @@ def main(
         optimizer.zero_grad()
         # Picks BATCH_SIZE random training images
         batch_idx = torch.randperm(n_images)[:BATCH_SIZE]
-        batch_cameras = select_cameras(target_cameras, batch_idx)
-        # The appearance code of each image in the batch (NeRF-W)
-        codes = appearance(batch_idx.to(device)) if appearance is not None else None
-        # The time of each image in the batch (dynamic scenes, T-NeRF)
-        batch_times = train_times[batch_idx.to(device)] if train_times is not None else None
+        # Gradient accumulation (train.grad_accum): the images are processed in GRAD_ACCUM parts and
+        # their gradients are added up before one optimizer step. Every loss is a mean, so weighting
+        # each part by its share of the images gives the same update with less GPU memory
+        parts = {"color": 0.0, "sil": None, "coarse": None, "inter": None, "dist": None, "total": 0.0}
 
-        # Random rays, then the first pass (and the second pass for hierarchical / proposal)
-        ray_bundle = raysampler_mc(cameras=batch_cameras)
-        out = render_rays(
-            ray_bundle, first, second, raymarcher, SAMPLER_SETTINGS, training=True, appearance_codes=codes,
-            times=batch_times,
-        )
+        def add(key, value, share):
+            parts[key] = (parts[key] or 0.0) + value.item() * share
 
-        # Loss on the final render (the fine / NeRF render for the two-pass samplers)
-        color_err, sil_err = compute_losses(
-            out["rgba"], ray_bundle.xys, target_images, target_silhouettes, batch_idx, extent
-        )
-        loss = color_err + (sil_err if sil_err is not None else 0.0)
+        for sub_idx in torch.chunk(batch_idx, GRAD_ACCUM):
+            share = len(sub_idx) / len(batch_idx)
+            batch_cameras = select_cameras(target_cameras, sub_idx)
+            # The appearance code of each image in the batch (NeRF-W)
+            codes = appearance(sub_idx.to(device)) if appearance is not None else None
+            # The time of each image in the batch (dynamic scenes, T-NeRF)
+            batch_times = train_times[sub_idx.to(device)] if train_times is not None else None
 
-        # NeRF also trains the coarse model on the same targets, so its weights stay useful
-        if out["rgba_coarse"] is not None:
-            color_err_c, sil_err_c = compute_losses(
-                out["rgba_coarse"], ray_bundle.xys, target_images, target_silhouettes, batch_idx, extent
+            # Random rays, then the first pass (and the second pass for hierarchical / proposal)
+            ray_bundle = raysampler_mc(cameras=batch_cameras)
+            out = render_rays(
+                ray_bundle, first, second, raymarcher, SAMPLER_SETTINGS, training=True, appearance_codes=codes,
+                times=batch_times,
             )
-            loss = loss + color_err_c + (sil_err_c if sil_err_c is not None else 0.0)
-            loss_history_coarse.append(color_err_c.item())
 
-        # The proposal network only learns to cover the NeRF weights (mip-NeRF 360, eq. 14)
-        if out["proposal_weights"] is not None:
-            inter_err = interlevel_loss(
-                out["lengths"], out["weights"], out["proposal_lengths"], out["proposal_weights"]
+            # Loss on the final render (the fine / NeRF render for the two-pass samplers)
+            color_err, sil_err = compute_losses(
+                out["rgba"], ray_bundle.xys, target_images, target_silhouettes, sub_idx, extent
             )
-            loss = loss + INTERLEVEL_WEIGHT * inter_err
-            loss_history_interlevel.append(inter_err.item())
+            loss = color_err + (sil_err if sil_err is not None else 0.0)
+            add("color", color_err, share)
+            if sil_err is not None:
+                add("sil", sil_err, share)
 
-        # Pulls the weights on each ray together, against floaters (mip-NeRF 360, eq. 15)
-        if DISTORTION_WEIGHT > 0:
-            dist_err = ray_distortion_loss(out, SAMPLER_SETTINGS)
-            loss = loss + DISTORTION_WEIGHT * dist_err
-            loss_history_dist.append(dist_err.item())
+            # NeRF also trains the coarse model on the same targets, so its weights stay useful
+            if out["rgba_coarse"] is not None:
+                color_err_c, sil_err_c = compute_losses(
+                    out["rgba_coarse"], ray_bundle.xys, target_images, target_silhouettes, sub_idx, extent
+                )
+                loss = loss + color_err_c + (sil_err_c if sil_err_c is not None else 0.0)
+                add("coarse", color_err_c, share)
 
-        if sil_err is not None:
-            loss_history_sil.append(sil_err.item())
-        loss_history_color.append(color_err.item())
-        loss_history_total.append(loss.item())
+            # The proposal network only learns to cover the NeRF weights (mip-NeRF 360, eq. 14)
+            if out["proposal_weights"] is not None:
+                inter_err = interlevel_loss(
+                    out["lengths"], out["weights"], out["proposal_lengths"], out["proposal_weights"]
+                )
+                loss = loss + INTERLEVEL_WEIGHT * inter_err
+                add("inter", inter_err, share)
 
-        loss.backward()
+            # Pulls the weights on each ray together, against floaters (mip-NeRF 360, eq. 15)
+            if DISTORTION_WEIGHT > 0:
+                dist_err = ray_distortion_loss(out, SAMPLER_SETTINGS)
+                loss = loss + DISTORTION_WEIGHT * dist_err
+                add("dist", dist_err, share)
+
+            add("total", loss, share)
+            (loss * share).backward()
+
+        loss_history_color.append(parts["color"])
+        loss_history_total.append(parts["total"])
+        for key, history in (("sil", loss_history_sil), ("coarse", loss_history_coarse),
+                             ("inter", loss_history_interlevel), ("dist", loss_history_dist)):
+            if parts[key] is not None:
+                history.append(parts[key])
+
         optimizer.step()
         if device.type == "cuda":
             torch.cuda.synchronize()  # waits for the GPU to finish, so the step time is accurate

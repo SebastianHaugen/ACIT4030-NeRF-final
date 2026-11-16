@@ -14,14 +14,19 @@ Time: wall-clock training time in minutes (-- if not logged).}
 \toprule
 Run & Sampler & Points & $\delta$ & Strat. & Other & PSNR $\uparrow$ (dB) & SSIM $\uparrow$ & LPIPS $\downarrow$ & Time (min) \\
 \midrule
+enc\_10\_4 & uniform & 128 & \checkmark & \checkmark & L=10/4 & $21.52 \pm 1.18$ & $0.863 \pm 0.007$ & $0.137 \pm 0.014$ & 13.5 \\
 enc\_mlp & uniform & 128 & \checkmark & \checkmark & 8-layer MLP, L=10/4 & $21.94 \pm 1.33$ & $0.870 \pm 0.007$ & $0.132 \pm 0.014$ & 36.6 \\
+enc\_mlp\_dist & uniform & 128 & \checkmark & \checkmark & 8-layer MLP, L=10/4, dist. & $21.83 \pm 1.29$ & $0.870 \pm 0.006$ & $0.130 \pm 0.013$ & 36.2 \\
 enc\_mlp\_dist\_prop & proposal & 128$\to$64 & \checkmark & \checkmark & 8-layer MLP, L=10/4, dist. & $22.05 \pm 1.39$ & $0.885 \pm 0.007$ & $0.115 \pm 0.011$ & 21.6 \\
 enc\_mlp\_dist\_prop\_exp\_4096 & proposal & 128$\to$64 & \checkmark & \checkmark & 8-layer MLP, L=10/4, dist., exp. LR, 4096 rays & $22.23 \pm 1.36$ & $0.884 \pm 0.006$ & $0.114 \pm 0.012$ & 52.8 \\
 enc\_mlp\_dist\_prop\_exp\_4096\_time & proposal & 128$\to$64 & \checkmark & \checkmark & 8-layer MLP, L=10/4, dist., time input, exp. LR, 4096 rays & $\mathbf{23.61 \pm 0.72}$ & $0.887 \pm 0.010$ & $0.103 \pm 0.010$ & 56.1 \\
 hashgrid & proposal & 128$\to$64 & \checkmark & \checkmark & hash grid, dist., exp. LR, 4096 rays & $21.36 \pm 1.38$ & $0.877 \pm 0.009$ & $0.120 \pm 0.019$ & 42.9 \\
 hashgrid\_time & proposal & 128$\to$64 & \checkmark & \checkmark & hash grid, dist., time input, exp. LR, 4096 rays & $23.43 \pm 0.90$ & $\mathbf{0.893 \pm 0.010}$ & $\mathbf{0.084 \pm 0.014}$ & 42.8 \\
+hier\_64\_128 & hierarchical & 64+128 & \checkmark & \checkmark & -- & $21.70 \pm 1.19$ & $0.867 \pm 0.007$ & $0.125 \pm 0.013$ & 38.1 \\
 uniform & uniform & 128 & -- & -- & -- & $21.60 \pm 1.10$ & $0.848 \pm 0.010$ & $0.140 \pm 0.012$ & 18.6 \\
 uniform\_delta & uniform & 128 & \checkmark & -- & -- & $21.71 \pm 1.30$ & $0.863 \pm 0.007$ & $0.128 \pm 0.014$ & 19.6 \\
+uniform\_delta\_strat & uniform & 128 & \checkmark & \checkmark & -- & $21.63 \pm 1.21$ & $0.860 \pm 0.007$ & $0.131 \pm 0.012$ & 18.3 \\
+uniform\_delta\_strat\_192 & uniform & 192 & \checkmark & \checkmark & -- & $21.75 \pm 1.23$ & $0.865 \pm 0.008$ & $0.126 \pm 0.013$ & 27.4 \\
 \bottomrule
 \end{tabular}
 \end{table*}

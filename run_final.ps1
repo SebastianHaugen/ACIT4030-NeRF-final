@@ -70,6 +70,17 @@ Run-Src "poster" "enc_mlp_dist_prop_contract_app_exp_4096"  (Merge (Merge $prop 
 Run-Src "lego"   "hashgrid_time"                    (Merge $hash @{ NERF_TIME = "true" })
 Run-Src "lego"   "enc_mlp_dist_prop_exp_4096_time"  (Merge (Merge $prop $budget) @{ NERF_TIME = "true" })
 
+# The rest of the earlier ablations (first run on the uncorrected data, partly on another PC),
+# repeated so every row is on the corrected data and the same GPU
+$strat = @{ NERF_DELTA = "true"; NERF_STRATIFIED = "true" }
+foreach ($dataset in "lego", "poster") {
+    Run-Src $dataset "uniform_delta_strat"      $strat
+    Run-Src $dataset "uniform_delta_strat_192"  (Merge $strat @{ NERF_N_PTS = "192" })
+    Run-Src $dataset "hier_64_128"              (Merge $strat @{ NERF_SAMPLER = "hierarchical"; NERF_N_COARSE = "64"; NERF_N_FINE = "128"; NERF_GRAD_ACCUM = "2" })
+    Run-Src $dataset "enc_10_4"                 (Merge $strat @{ NERF_N_HARM = "10"; NERF_N_HARM_DIR = "4"; NERF_OMEGA0 = "3.14159265"; NERF_INCLUDE_INPUT = "true" })
+    Run-Src $dataset "enc_mlp_dist"             (Merge $mlp @{ NERF_DIST_WEIGHT = "0.01" })
+}
+
 Clear-Overrides
 $env:NERF_FIX_DATA = "true"
 python -m src.report_figures *> logs\final_report.log
