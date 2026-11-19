@@ -11,10 +11,14 @@ Improving the PyTorch3D NeRF from the course book (Chapter 6) step by step: bett
 | `outputs/` | Results: metrics, loss histories, configs, test renders and figures. Checkpoints and previews are not in git. |
 | `report/figures/` | Figures used in the report. |
 
+## Data
+Download `acit4030-data.zip` from Canvas and unzip it so that the folders are `data/lego/` and `data/poster/`.
+
 ## Setup
     pip install -r requirements.txt
 
 PyTorch and PyTorch3D are installed separately, matching your CUDA version (see `requirements.txt`).
+Use a Python version that your PyTorch3D build supports. Very new versions (for example 3.14) may not be supported yet.
 
 ## Running
 Single experiment (settings from `src/config.yaml`, any of them can be overridden with a `NERF_*` environment variable, see `src/repo_util/LoadConfigurations.py`):
@@ -89,9 +93,13 @@ Notes:
 - Neighbour codes: poster is a video with automatic exposure, so the average appearance code gives some test views slightly wrong colours. The codes of the training frames recorded just before and after a test frame fix that, using training information only.
 - Stratified sampling, more samples and the distortion loss make no real difference here. The spacing-aware density, the NeRF MLP and (for poster) appearance codes and the hash grid do.
 - Proposal sampling on poster only works together with contraction and lin-disp spacing; with linear spacing and 64 samples the background gets too few samples.
-- 360° orbits of the worst and best model per dataset (GIFs and a filmstrip figure with depth): `outputs/src_fixed/figures/orbits/`.
-- `outputs/src/` holds the earlier ablations on the uncorrected data. Their run scripts are in git history (commit `f9ca36c`).
+- `outputs/src/` holds the earlier ablations on the uncorrected data (run scripts in git history, commit `f9ca36c`). `run_final.sh` repeats them on the corrected data in `outputs/src_fixed/`.
+
+## 360° orbits
+Book model (left) and the best model (right) on each dataset. The filmstrip figures with depth are in `outputs/src_fixed/figures/orbits/`.
+
+![Lego orbit](outputs/src_fixed/figures/orbits/lego_orbit_comparison.gif)
+
+![Poster orbit](outputs/src_fixed/figures/orbits/poster_orbit_comparison.gif)
 
 Sampler visualisations: https://docs.nerf.studio/nerfology/model_components/visualize_samplers.html
-
-
